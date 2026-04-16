@@ -26,6 +26,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ElevatedCard
@@ -37,6 +38,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
 import androidx.compose.material3.rememberDatePickerState
@@ -56,7 +58,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.gogogo.appgo.model.ExerciseType
+import com.gogogo.appgo.model.BackupCloudProvider
+import com.gogogo.appgo.model.BackupStrategyTemplate
 import com.gogogo.appgo.model.RecordingStatus
+import com.gogogo.appgo.model.RecordingMetric
 import com.gogogo.appgo.model.StatsSummary
 import com.gogogo.appgo.model.UserProfile
 import com.gogogo.appgo.ui.AppUiState
@@ -143,6 +148,32 @@ fun AppGoApp(viewModel: AppViewModel = viewModel()) {
                     onToggleBluetooth = viewModel::toggleBluetoothConnection,
                     onUpdateProfile = viewModel::updateProfile,
                 )
+
+                AppDestination.SETTINGS -> SettingsScreen(
+                    modifier = Modifier.padding(innerPadding),
+                    uiState = uiState,
+                    onMetricVisibleChange = viewModel::setMetricVisible,
+                    onMapEnabledChange = viewModel::setMapEnabled,
+                    onMapApiKeyChange = viewModel::updateMapApiKey,
+                    onWeatherEnabledChange = viewModel::setWeatherEnabled,
+                    onWeatherApiKeyChange = viewModel::updateWeatherApiKey,
+                    onShareEnabledChange = viewModel::setShareEnabled,
+                    onShareApiKeyChange = viewModel::updateShareApiKey,
+                    onLocalBackupEnabledChange = viewModel::setLocalBackupEnabled,
+                    onCloudProviderChange = viewModel::setCloudProvider,
+                    onCloudBackupEnabledChange = viewModel::setCloudBackupEnabled,
+                    onCloudApiKeyChange = viewModel::updateCloudApiKey,
+                    onCloudSecretChange = viewModel::updateCloudSecret,
+                    onCloudBucketOrPathChange = viewModel::updateCloudBucketOrPath,
+                    onCloudEndpointChange = viewModel::updateCloudEndpoint,
+                    onTemplateChange = viewModel::applyBackupTemplate,
+                    onBackupAutoEnabledChange = viewModel::setBackupAutoEnabled,
+                    onBackupIntervalHoursChange = viewModel::updateBackupIntervalHours,
+                    onBackupRetainDaysChange = viewModel::updateBackupRetainDays,
+                    onBackupWifiOnlyChange = viewModel::setBackupWifiOnly,
+                    onBackupChargingOnlyChange = viewModel::setBackupChargingOnly,
+                    onRunManualBackup = viewModel::runManualBackup,
+                )
             }
         }
     }
@@ -164,6 +195,7 @@ enum class AppDestination(val label: String, val icon: Int) {
     RECORD("记录", R.drawable.ic_favorite),
     HISTORY("历史", R.drawable.ic_favorite),
     PROFILE("我的", R.drawable.ic_account_box),
+    SETTINGS("设置", R.drawable.ic_account_box),
 }
 
 private enum class HistoryPickerTarget {
@@ -289,16 +321,32 @@ private fun RecordingScreen(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("实时数据", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    DataCell("里程", formatDistance(uiState.distanceMeters))
-                    DataCell("用时", formatDuration(uiState.elapsedSeconds))
-                    DataCell("配速", formatPace(uiState.averagePaceSecondsPerKm))
+                val metrics = buildMetricItems(uiState)
+                if (metrics.isEmpty()) {
+                    Text("当前未选择展示项，请到设置页勾选记录面板字段。")
+                } else {
+                    metrics.chunked(3).forEachIndexed { index, chunk ->
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            chunk.forEach { (label, value) ->
+                                DataCell(label, value)
+                            }
+                            repeat(3 - chunk.size) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                        if (index != metrics.lastIndex / 3) {
+                            HorizontalDivider()
+                        }
+                    }
                 }
-                HorizontalDivider()
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    DataCell("海拔", "${uiState.currentAltitude.roundToInt()} m")
-                    DataCell("爬升", "${uiState.totalElevationGain.roundToInt()} m")
-                    DataCell("心率", uiState.currentHeartRate?.let { "$it bpm" } ?: "--")
+
+                val service = uiState.settings.serviceIntegration
+                if (service.mapActive || service.weatherActive || service.shareActive) {
+                    HorizontalDivider()
+                    Text("已接入服务", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    if (service.mapActive) Text("地图服务: 已启用")
+                    if (service.weatherActive) Text("天气服务: 已启用")
+                    if (service.shareActive) Text("轨迹共享服务: 已启用")
                 }
             }
         }
@@ -587,7 +635,9 @@ private fun ProfileScreen(
                 OutlinedButton(onClick = onToggleBluetooth, modifier = Modifier.fillMaxWidth()) {
                     Text(if (uiState.bluetoothConnected) "断开设备" else "连接设备")
                 }
-                Text("离线地图包管理: MVP占位")
+                if (uiState.settings.serviceIntegration.mapActive) {
+                    Text("离线地图包管理: 已接入地图服务")
+                }
             }
         }
 
@@ -595,8 +645,265 @@ private fun ProfileScreen(
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("安全", fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(value = emergency, onValueChange = { emergency = it }, label = { Text("紧急联系人") }, modifier = Modifier.fillMaxWidth())
-                Text("实时位置共享: 待接入后端链接服务")
+                if (uiState.settings.serviceIntegration.shareActive) {
+                    Text("实时位置共享: 已接入共享服务")
+                }
+                if (uiState.settings.serviceIntegration.weatherActive) {
+                    Text("天气安全提醒: 已接入天气服务")
+                }
                 Text("一键求助: 长按按钮触发短信发送（MVP占位）")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    modifier: Modifier,
+    uiState: AppUiState,
+    onMetricVisibleChange: (RecordingMetric, Boolean) -> Unit,
+    onMapEnabledChange: (Boolean) -> Unit,
+    onMapApiKeyChange: (String) -> Unit,
+    onWeatherEnabledChange: (Boolean) -> Unit,
+    onWeatherApiKeyChange: (String) -> Unit,
+    onShareEnabledChange: (Boolean) -> Unit,
+    onShareApiKeyChange: (String) -> Unit,
+    onLocalBackupEnabledChange: (Boolean) -> Unit,
+    onCloudProviderChange: (BackupCloudProvider) -> Unit,
+    onCloudBackupEnabledChange: (Boolean) -> Unit,
+    onCloudApiKeyChange: (String) -> Unit,
+    onCloudSecretChange: (String) -> Unit,
+    onCloudBucketOrPathChange: (String) -> Unit,
+    onCloudEndpointChange: (String) -> Unit,
+    onTemplateChange: (BackupStrategyTemplate) -> Unit,
+    onBackupAutoEnabledChange: (Boolean) -> Unit,
+    onBackupIntervalHoursChange: (Int) -> Unit,
+    onBackupRetainDaysChange: (Int) -> Unit,
+    onBackupWifiOnlyChange: (Boolean) -> Unit,
+    onBackupChargingOnlyChange: (Boolean) -> Unit,
+    onRunManualBackup: () -> Unit,
+) {
+    val services = uiState.settings.serviceIntegration
+    val backup = uiState.settings.backupConfig
+    var intervalHoursInput by remember(backup.strategy.intervalHours) { mutableStateOf(backup.strategy.intervalHours.toString()) }
+    var retainDaysInput by remember(backup.strategy.retainDays) { mutableStateOf(backup.strategy.retainDays.toString()) }
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("设置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("记录页展示项", fontWeight = FontWeight.SemiBold)
+                Text("勾选后才会在记录页展示。至少保留一个字段。", style = MaterialTheme.typography.bodySmall)
+                RecordingMetric.entries.chunked(2).forEach { row ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        row.forEach { metric ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(
+                                    checked = uiState.settings.visibleMetrics.contains(metric),
+                                    onCheckedChange = { checked -> onMetricVisibleChange(metric, checked) },
+                                )
+                                Text(metric.label)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ServiceIntegrationCard(
+            title = "地图服务",
+            enabled = services.mapEnabled,
+            apiKey = services.mapApiKey,
+            isActive = services.mapActive,
+            hint = "用于地图渲染/离线地图服务",
+            onEnabledChange = onMapEnabledChange,
+            onApiKeyChange = onMapApiKeyChange,
+        )
+
+        ServiceIntegrationCard(
+            title = "天气服务",
+            enabled = services.weatherEnabled,
+            apiKey = services.weatherApiKey,
+            isActive = services.weatherActive,
+            hint = "用于天气与环境提醒",
+            onEnabledChange = onWeatherEnabledChange,
+            onApiKeyChange = onWeatherApiKeyChange,
+        )
+
+        ServiceIntegrationCard(
+            title = "轨迹共享服务",
+            enabled = services.shareEnabled,
+            apiKey = services.shareApiKey,
+            isActive = services.shareActive,
+            hint = "用于实时位置与轨迹分享",
+            onEnabledChange = onShareEnabledChange,
+            onApiKeyChange = onShareApiKeyChange,
+        )
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("备份配置", fontWeight = FontWeight.SemiBold)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("启用本地备份")
+                    Switch(
+                        checked = backup.localBackupEnabled,
+                        onCheckedChange = onLocalBackupEnabledChange,
+                    )
+                }
+                Text("云端提供商", style = MaterialTheme.typography.bodySmall)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(BackupCloudProvider.entries) { provider ->
+                        AssistChip(
+                            onClick = { onCloudProviderChange(provider) },
+                            label = { Text(provider.label) },
+                            border = if (backup.cloudConfig.provider == provider) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                        )
+                    }
+                }
+
+                if (backup.cloudConfig.provider != BackupCloudProvider.NONE) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Text("启用云端备份")
+                        Switch(
+                            checked = backup.cloudConfig.isActive,
+                            onCheckedChange = onCloudBackupEnabledChange,
+                            enabled = backup.cloudConfig.isConfigured,
+                        )
+                    }
+                    OutlinedTextField(
+                        value = backup.cloudConfig.apiKey,
+                        onValueChange = onCloudApiKeyChange,
+                        label = { Text("Cloud API Key") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = backup.cloudConfig.secret,
+                        onValueChange = onCloudSecretChange,
+                        label = { Text("Cloud Secret (可选)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = backup.cloudConfig.bucketOrPath,
+                        onValueChange = onCloudBucketOrPathChange,
+                        label = { Text("Bucket / Path") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = backup.cloudConfig.endpoint,
+                        onValueChange = onCloudEndpointChange,
+                        label = { Text("Endpoint (可选)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    if (!backup.cloudConfig.isConfigured) {
+                        Text("云端未配置完成，不会展示/执行云备份。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                Text("备份策略模板", style = MaterialTheme.typography.bodySmall)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(BackupStrategyTemplate.entries) { template ->
+                        AssistChip(
+                            onClick = { onTemplateChange(template) },
+                            label = { Text(template.label) },
+                            border = if (backup.strategyTemplate == template) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                        )
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("自动备份")
+                    Switch(checked = backup.strategy.autoBackupEnabled, onCheckedChange = onBackupAutoEnabledChange)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("仅 Wi-Fi")
+                    Switch(checked = backup.strategy.wifiOnly, onCheckedChange = onBackupWifiOnlyChange)
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("仅充电时")
+                    Switch(checked = backup.strategy.chargingOnly, onCheckedChange = onBackupChargingOnlyChange)
+                }
+                OutlinedTextField(
+                    value = intervalHoursInput,
+                    onValueChange = {
+                        intervalHoursInput = it
+                        it.toIntOrNull()?.let(onBackupIntervalHoursChange)
+                    },
+                    label = { Text("备份间隔（小时）") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = retainDaysInput,
+                    onValueChange = {
+                        retainDaysInput = it
+                        it.toIntOrNull()?.let(onBackupRetainDaysChange)
+                    },
+                    label = { Text("保留天数") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+
+                Button(
+                    onClick = onRunManualBackup,
+                    enabled = !uiState.backupInProgress,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (uiState.backupInProgress) "备份执行中..." else "立即备份")
+                }
+                backup.lastBackupTimeMillis?.let { ts ->
+                    Text("最近备份: ${formatDate(ts)}", style = MaterialTheme.typography.bodySmall)
+                }
+                if (backup.lastBackupResult.isNotBlank()) {
+                    Text("结果: ${backup.lastBackupResult}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServiceIntegrationCard(
+    title: String,
+    enabled: Boolean,
+    apiKey: String,
+    isActive: Boolean,
+    hint: String,
+    onEnabledChange: (Boolean) -> Unit,
+    onApiKeyChange: (String) -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                Switch(
+                    checked = enabled && apiKey.isNotBlank(),
+                    onCheckedChange = { onEnabledChange(it) },
+                    enabled = apiKey.isNotBlank(),
+                )
+            }
+            OutlinedTextField(
+                value = apiKey,
+                onValueChange = onApiKeyChange,
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("API Key") },
+                placeholder = { Text("请输入 API Key") },
+                singleLine = true,
+            )
+            Text(hint, style = MaterialTheme.typography.bodySmall)
+            if (apiKey.isBlank()) {
+                Text("未提供 API Key，不显示该服务相关内容。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            } else {
+                Text(if (isActive) "状态: 已启用" else "状态: 已提供 key，未启用", style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -637,6 +944,22 @@ private fun statusText(status: RecordingStatus): String = when (status) {
     RecordingStatus.PAUSED -> "手动暂停"
     RecordingStatus.AUTO_PAUSED -> "自动暂停"
     RecordingStatus.FINISHED -> "待保存"
+}
+
+private fun buildMetricItems(uiState: AppUiState): List<Pair<String, String>> {
+    val all = mapOf(
+        RecordingMetric.DISTANCE to formatDistance(uiState.distanceMeters),
+        RecordingMetric.DURATION to formatDuration(uiState.elapsedSeconds),
+        RecordingMetric.PACE to formatPace(uiState.averagePaceSecondsPerKm),
+        RecordingMetric.ALTITUDE to "${uiState.currentAltitude.roundToInt()} m",
+        RecordingMetric.ELEVATION to "${uiState.totalElevationGain.roundToInt()} m",
+        RecordingMetric.HEART_RATE to (uiState.currentHeartRate?.let { "$it bpm" } ?: "--"),
+        RecordingMetric.SPEED to "${"%.2f".format(uiState.currentSpeedMps)} m/s",
+        RecordingMetric.MOVEMENT to if (uiState.movementDetected) "运动中" else "静止",
+    )
+    return RecordingMetric.entries
+        .filter { uiState.settings.visibleMetrics.contains(it) }
+        .map { metric -> metric.label to (all[metric] ?: "--") }
 }
 
 private fun weekDisplay(anchor: LocalDate): String {

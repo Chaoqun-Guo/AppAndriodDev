@@ -3,6 +3,7 @@ package com.gogogo.appgo.ui
 import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -17,9 +18,17 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gogogo.appgo.data.WorkoutRepository
+import com.gogogo.appgo.model.BackupCloudProvider
+import com.gogogo.appgo.model.BackupConfig
+import com.gogogo.appgo.model.BackupStrategy
+import com.gogogo.appgo.model.BackupStrategyTemplate
+import com.gogogo.appgo.model.CloudBackupConfig
 import com.gogogo.appgo.model.ExerciseType
 import com.gogogo.appgo.model.MarkerPoint
+import com.gogogo.appgo.model.AppSettings
 import com.gogogo.appgo.model.RecordingStatus
+import com.gogogo.appgo.model.RecordingMetric
+import com.gogogo.appgo.model.ServiceIntegrationConfig
 import com.gogogo.appgo.model.StatsSummary
 import com.gogogo.appgo.model.TrackPoint
 import com.gogogo.appgo.model.UserProfile
@@ -32,6 +41,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
@@ -74,6 +84,8 @@ data class AppUiState(
     val pendingRecord: WorkoutRecord? = null,
     val profile: UserProfile = UserProfile(),
     val bluetoothConnected: Boolean = false,
+    val settings: AppSettings = AppSettings(),
+    val backupInProgress: Boolean = false,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -81,6 +93,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val locationManager = application.getSystemService(Context.LOCATION_SERVICE) as LocationManager
     private val sensorManager = application.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private val prefs: SharedPreferences =
+        application.getSharedPreferences("appgo_settings", Context.MODE_PRIVATE)
 
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -126,6 +140,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        loadSettings()
         refreshFromDatabase()
     }
 
@@ -308,6 +323,229 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(bluetoothConnected = !it.bluetoothConnected) }
     }
 
+    fun setMetricVisible(metric: RecordingMetric, visible: Boolean) {
+        _uiState.update { state ->
+            val next = state.settings.visibleMetrics.toMutableSet()
+            if (visible) {
+                next.add(metric)
+            } else {
+                if (next.size == 1 && next.contains(metric)) return@update state
+                next.remove(metric)
+            }
+            state.copy(settings = state.settings.copy(visibleMetrics = next))
+        }
+        persistSettings()
+    }
+
+    fun updateMapApiKey(key: String) {
+        updateServiceSettings { it.copy(mapApiKey = key, mapEnabled = it.mapEnabled && key.isNotBlank()) }
+    }
+
+    fun setMapEnabled(enabled: Boolean) {
+        updateServiceSettings {
+            it.copy(mapEnabled = enabled && it.mapApiKey.isNotBlank())
+        }
+    }
+
+    fun updateWeatherApiKey(key: String) {
+        updateServiceSettings { it.copy(weatherApiKey = key, weatherEnabled = it.weatherEnabled && key.isNotBlank()) }
+    }
+
+    fun setWeatherEnabled(enabled: Boolean) {
+        updateServiceSettings {
+            it.copy(weatherEnabled = enabled && it.weatherApiKey.isNotBlank())
+        }
+    }
+
+    fun updateShareApiKey(key: String) {
+        updateServiceSettings { it.copy(shareApiKey = key, shareEnabled = it.shareEnabled && key.isNotBlank()) }
+    }
+
+    fun setShareEnabled(enabled: Boolean) {
+        updateServiceSettings {
+            it.copy(shareEnabled = enabled && it.shareApiKey.isNotBlank())
+        }
+    }
+
+    fun setLocalBackupEnabled(enabled: Boolean) {
+        updateBackupConfig { it.copy(localBackupEnabled = enabled) }
+    }
+
+    fun setCloudProvider(provider: BackupCloudProvider) {
+        updateBackupConfig {
+            it.copy(
+                cloudConfig = it.cloudConfig.copy(
+                    provider = provider,
+                    enabled = if (provider == BackupCloudProvider.NONE) false else it.cloudConfig.enabled,
+                )
+            )
+        }
+    }
+
+    fun setCloudBackupEnabled(enabled: Boolean) {
+        updateBackupConfig {
+            it.copy(
+                cloudConfig = it.cloudConfig.copy(
+                    enabled = enabled && it.cloudConfig.isConfigured,
+                )
+            )
+        }
+    }
+
+    fun updateCloudApiKey(value: String) {
+        updateBackupConfig {
+            it.copy(
+                cloudConfig = it.cloudConfig.copy(
+                    apiKey = value,
+                    enabled = it.cloudConfig.enabled && value.isNotBlank() && it.cloudConfig.bucketOrPath.isNotBlank(),
+                )
+            )
+        }
+    }
+
+    fun updateCloudSecret(value: String) {
+        updateBackupConfig {
+            it.copy(cloudConfig = it.cloudConfig.copy(secret = value))
+        }
+    }
+
+    fun updateCloudBucketOrPath(value: String) {
+        updateBackupConfig {
+            it.copy(
+                cloudConfig = it.cloudConfig.copy(
+                    bucketOrPath = value,
+                    enabled = it.cloudConfig.enabled && it.cloudConfig.apiKey.isNotBlank() && value.isNotBlank(),
+                )
+            )
+        }
+    }
+
+    fun updateCloudEndpoint(value: String) {
+        updateBackupConfig {
+            it.copy(cloudConfig = it.cloudConfig.copy(endpoint = value))
+        }
+    }
+
+    fun applyBackupTemplate(template: BackupStrategyTemplate) {
+        updateBackupConfig {
+            val strategy = if (template == BackupStrategyTemplate.CUSTOM) {
+                it.strategy
+            } else {
+                it.strategy.copy(
+                    intervalHours = template.intervalHours,
+                    wifiOnly = template.wifiOnly,
+                    chargingOnly = template.chargingOnly,
+                    retainDays = template.retainDays,
+                )
+            }
+            it.copy(strategyTemplate = template, strategy = strategy)
+        }
+    }
+
+    fun setBackupAutoEnabled(enabled: Boolean) {
+        updateBackupConfig {
+            it.copy(strategy = it.strategy.copy(autoBackupEnabled = enabled))
+        }
+    }
+
+    fun updateBackupIntervalHours(value: Int) {
+        updateBackupConfig {
+            it.copy(
+                strategyTemplate = BackupStrategyTemplate.CUSTOM,
+                strategy = it.strategy.copy(intervalHours = value.coerceIn(1, 168)),
+            )
+        }
+    }
+
+    fun updateBackupRetainDays(value: Int) {
+        updateBackupConfig {
+            it.copy(
+                strategyTemplate = BackupStrategyTemplate.CUSTOM,
+                strategy = it.strategy.copy(retainDays = value.coerceIn(1, 365)),
+            )
+        }
+    }
+
+    fun setBackupWifiOnly(enabled: Boolean) {
+        updateBackupConfig {
+            it.copy(
+                strategyTemplate = BackupStrategyTemplate.CUSTOM,
+                strategy = it.strategy.copy(wifiOnly = enabled),
+            )
+        }
+    }
+
+    fun setBackupChargingOnly(enabled: Boolean) {
+        updateBackupConfig {
+            it.copy(
+                strategyTemplate = BackupStrategyTemplate.CUSTOM,
+                strategy = it.strategy.copy(chargingOnly = enabled),
+            )
+        }
+    }
+
+    fun runManualBackup() {
+        if (_uiState.value.backupInProgress) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(backupInProgress = true) }
+            val now = System.currentTimeMillis()
+            val backupConfig = _uiState.value.settings.backupConfig
+            val history = repository.loadWorkoutSummaries()
+            val targets = mutableListOf<String>()
+
+            val backupJson = buildString {
+                append("{\"backup_time_millis\":")
+                append(now)
+                append(",\"workout_count\":")
+                append(history.size)
+                append(",\"workouts\":[")
+                append(history.joinToString(",") { summary ->
+                    val record = summary.record
+                    "{\"id\":${record.id},\"type\":\"${record.type.name}\",\"start\":${record.startTimeMillis},\"end\":${record.endTimeMillis},\"distance\":${record.totalDistanceMeters},\"elevation\":${record.totalElevationGainMeters},\"track_points\":${summary.trackPointCount}}"
+                })
+                append("]}")
+            }
+
+            var localPath: String? = null
+            if (backupConfig.localBackupEnabled) {
+                val folder = File(getApplication<Application>().filesDir, "backups")
+                folder.mkdirs()
+                val file = File(folder, "backup_${now}.json")
+                file.writeText(backupJson)
+                localPath = file.absolutePath
+                targets += "本地"
+                pruneLocalBackups(folder, backupConfig.strategy.retainDays)
+            }
+
+            if (backupConfig.cloudConfig.isActive) {
+                val folder = File(getApplication<Application>().filesDir, "backups")
+                folder.mkdirs()
+                val task = File(folder, "cloud_task_${now}.json")
+                val cloud = backupConfig.cloudConfig
+                task.writeText(
+                    """
+                    {"provider":"${cloud.provider.name}","endpoint":"${cloud.endpoint}","bucket_or_path":"${cloud.bucketOrPath}","source_file":"${localPath ?: ""}","created_at":$now}
+                    """.trimIndent()
+                )
+                targets += "云端(${cloud.provider.label})"
+            }
+
+            val result = if (targets.isEmpty()) {
+                "备份失败：未启用本地或云端备份目标。"
+            } else {
+                "备份完成：${targets.joinToString("、")}"
+            }
+
+            updateBackupConfig {
+                it.copy(
+                    lastBackupTimeMillis = now,
+                    lastBackupResult = result,
+                )
+            }
+            _uiState.update { it.copy(backupInProgress = false) }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         stopTickerAndInputs()
@@ -348,6 +586,145 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
         }
+    }
+
+    private fun updateBackupConfig(transform: (BackupConfig) -> BackupConfig) {
+        _uiState.update { state ->
+            val changed = transform(state.settings.backupConfig)
+            val normalizedCloud = changed.cloudConfig.copy(
+                enabled = changed.cloudConfig.enabled && changed.cloudConfig.isConfigured,
+            )
+            val normalized = changed.copy(cloudConfig = normalizedCloud)
+            state.copy(settings = state.settings.copy(backupConfig = normalized))
+        }
+        persistSettings()
+    }
+
+    private fun updateServiceSettings(transform: (ServiceIntegrationConfig) -> ServiceIntegrationConfig) {
+        _uiState.update { state ->
+            val current = state.settings.serviceIntegration
+            val changed = transform(current)
+            val updated = changed.copy(
+                mapEnabled = changed.mapEnabled && changed.mapApiKey.isNotBlank(),
+                weatherEnabled = changed.weatherEnabled && changed.weatherApiKey.isNotBlank(),
+                shareEnabled = changed.shareEnabled && changed.shareApiKey.isNotBlank(),
+            )
+            state.copy(settings = state.settings.copy(serviceIntegration = updated))
+        }
+        persistSettings()
+    }
+
+    private fun loadSettings() {
+        val metricsRaw = prefs.getString("visible_metrics", null)
+        val metrics = metricsRaw
+            ?.split(",")
+            ?.mapNotNull { name -> RecordingMetric.entries.find { it.name == name } }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
+            ?: AppSettings().visibleMetrics
+
+        val mapApiKey = prefs.getString("map_api_key", "") ?: ""
+        val mapEnabled = prefs.getBoolean("map_enabled", false) && mapApiKey.isNotBlank()
+        val weatherApiKey = prefs.getString("weather_api_key", "") ?: ""
+        val weatherEnabled = prefs.getBoolean("weather_enabled", false) && weatherApiKey.isNotBlank()
+        val shareApiKey = prefs.getString("share_api_key", "") ?: ""
+        val shareEnabled = prefs.getBoolean("share_enabled", false) && shareApiKey.isNotBlank()
+
+        val localBackupEnabled = prefs.getBoolean("backup_local_enabled", true)
+        val cloudProvider = runCatching {
+            BackupCloudProvider.valueOf(
+                prefs.getString("backup_cloud_provider", BackupCloudProvider.NONE.name)
+                    ?: BackupCloudProvider.NONE.name
+            )
+        }.getOrElse { BackupCloudProvider.NONE }
+        val cloudApiKey = prefs.getString("backup_cloud_api_key", "") ?: ""
+        val cloudSecret = prefs.getString("backup_cloud_secret", "") ?: ""
+        val cloudBucketOrPath = prefs.getString("backup_cloud_bucket_path", "") ?: ""
+        val cloudEndpoint = prefs.getString("backup_cloud_endpoint", "") ?: ""
+        val cloudEnabledRaw = prefs.getBoolean("backup_cloud_enabled", false)
+        val strategyTemplate = runCatching {
+            BackupStrategyTemplate.valueOf(
+                prefs.getString("backup_template", BackupStrategyTemplate.SAFE_DAILY.name)
+                    ?: BackupStrategyTemplate.SAFE_DAILY.name
+            )
+        }.getOrElse { BackupStrategyTemplate.SAFE_DAILY }
+        val strategy = BackupStrategy(
+            autoBackupEnabled = prefs.getBoolean("backup_auto_enabled", false),
+            intervalHours = prefs.getInt("backup_interval_hours", strategyTemplate.intervalHours).coerceIn(1, 168),
+            wifiOnly = prefs.getBoolean("backup_wifi_only", strategyTemplate.wifiOnly),
+            chargingOnly = prefs.getBoolean("backup_charging_only", strategyTemplate.chargingOnly),
+            retainDays = prefs.getInt("backup_retain_days", strategyTemplate.retainDays).coerceIn(1, 365),
+        )
+        val cloudConfig = CloudBackupConfig(
+            provider = cloudProvider,
+            enabled = cloudEnabledRaw,
+            apiKey = cloudApiKey,
+            secret = cloudSecret,
+            bucketOrPath = cloudBucketOrPath,
+            endpoint = cloudEndpoint,
+        )
+        val lastBackupTimeMillis = prefs.getLong("backup_last_time", -1L).takeIf { it > 0 }
+        val lastBackupResult = prefs.getString("backup_last_result", "") ?: ""
+
+        _uiState.update {
+            it.copy(
+                settings = AppSettings(
+                    visibleMetrics = metrics,
+                    serviceIntegration = ServiceIntegrationConfig(
+                        mapApiKey = mapApiKey,
+                        mapEnabled = mapEnabled,
+                        weatherApiKey = weatherApiKey,
+                        weatherEnabled = weatherEnabled,
+                        shareApiKey = shareApiKey,
+                        shareEnabled = shareEnabled,
+                    ),
+                    backupConfig = BackupConfig(
+                        localBackupEnabled = localBackupEnabled,
+                        cloudConfig = cloudConfig.copy(enabled = cloudConfig.enabled && cloudConfig.isConfigured),
+                        strategyTemplate = strategyTemplate,
+                        strategy = strategy,
+                        lastBackupTimeMillis = lastBackupTimeMillis,
+                        lastBackupResult = lastBackupResult,
+                    ),
+                ),
+            )
+        }
+    }
+
+    private fun persistSettings() {
+        val settings = _uiState.value.settings
+        prefs.edit()
+            .putString("visible_metrics", settings.visibleMetrics.joinToString(",") { it.name })
+            .putString("map_api_key", settings.serviceIntegration.mapApiKey)
+            .putBoolean("map_enabled", settings.serviceIntegration.mapEnabled)
+            .putString("weather_api_key", settings.serviceIntegration.weatherApiKey)
+            .putBoolean("weather_enabled", settings.serviceIntegration.weatherEnabled)
+            .putString("share_api_key", settings.serviceIntegration.shareApiKey)
+            .putBoolean("share_enabled", settings.serviceIntegration.shareEnabled)
+            .putBoolean("backup_local_enabled", settings.backupConfig.localBackupEnabled)
+            .putString("backup_cloud_provider", settings.backupConfig.cloudConfig.provider.name)
+            .putBoolean("backup_cloud_enabled", settings.backupConfig.cloudConfig.enabled)
+            .putString("backup_cloud_api_key", settings.backupConfig.cloudConfig.apiKey)
+            .putString("backup_cloud_secret", settings.backupConfig.cloudConfig.secret)
+            .putString("backup_cloud_bucket_path", settings.backupConfig.cloudConfig.bucketOrPath)
+            .putString("backup_cloud_endpoint", settings.backupConfig.cloudConfig.endpoint)
+            .putString("backup_template", settings.backupConfig.strategyTemplate.name)
+            .putBoolean("backup_auto_enabled", settings.backupConfig.strategy.autoBackupEnabled)
+            .putInt("backup_interval_hours", settings.backupConfig.strategy.intervalHours)
+            .putBoolean("backup_wifi_only", settings.backupConfig.strategy.wifiOnly)
+            .putBoolean("backup_charging_only", settings.backupConfig.strategy.chargingOnly)
+            .putInt("backup_retain_days", settings.backupConfig.strategy.retainDays)
+            .putLong("backup_last_time", settings.backupConfig.lastBackupTimeMillis ?: -1L)
+            .putString("backup_last_result", settings.backupConfig.lastBackupResult)
+            .apply()
+    }
+
+    private fun pruneLocalBackups(folder: File, retainDays: Int) {
+        val threshold = System.currentTimeMillis() - retainDays * 24L * 3600L * 1000L
+        folder.listFiles()
+            ?.filter { it.name.startsWith("backup_") && it.name.endsWith(".json") }
+            ?.filter { it.lastModified() < threshold }
+            ?.forEach { runCatching { it.delete() } }
     }
 
     private fun startInputs() {

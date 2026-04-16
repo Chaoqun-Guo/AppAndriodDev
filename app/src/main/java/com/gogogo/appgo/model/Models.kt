@@ -81,3 +81,99 @@ data class UserProfile(
     val preferences: String = "徒步、跑步",
     val emergencyContact: String = "",
 )
+
+enum class RecordingMetric(val label: String) {
+    DISTANCE("里程"),
+    DURATION("用时"),
+    PACE("配速"),
+    ALTITUDE("海拔"),
+    ELEVATION("爬升"),
+    HEART_RATE("心率"),
+    SPEED("速度"),
+    MOVEMENT("运动状态"),
+}
+
+data class ServiceIntegrationConfig(
+    val mapApiKey: String = "",
+    val mapEnabled: Boolean = false,
+    val weatherApiKey: String = "",
+    val weatherEnabled: Boolean = false,
+    val shareApiKey: String = "",
+    val shareEnabled: Boolean = false,
+) {
+    val mapActive: Boolean
+        get() = mapEnabled && mapApiKey.isNotBlank()
+
+    val weatherActive: Boolean
+        get() = weatherEnabled && weatherApiKey.isNotBlank()
+
+    val shareActive: Boolean
+        get() = shareEnabled && shareApiKey.isNotBlank()
+}
+
+data class AppSettings(
+    val visibleMetrics: Set<RecordingMetric> = setOf(
+        RecordingMetric.DISTANCE,
+        RecordingMetric.DURATION,
+        RecordingMetric.PACE,
+        RecordingMetric.ALTITUDE,
+        RecordingMetric.ELEVATION,
+        RecordingMetric.HEART_RATE,
+    ),
+    val serviceIntegration: ServiceIntegrationConfig = ServiceIntegrationConfig(),
+    val backupConfig: BackupConfig = BackupConfig(),
+)
+
+enum class BackupCloudProvider(val label: String) {
+    NONE("不使用云端"),
+    GOOGLE_CLOUD("Google Cloud Storage"),
+    S3_COMPATIBLE("S3 兼容对象存储"),
+    WEBDAV("WebDAV 云盘"),
+}
+
+enum class BackupStrategyTemplate(
+    val label: String,
+    val intervalHours: Int,
+    val wifiOnly: Boolean,
+    val chargingOnly: Boolean,
+    val retainDays: Int,
+) {
+    SAFE_DAILY("安全优先（每日）", intervalHours = 24, wifiOnly = true, chargingOnly = true, retainDays = 30),
+    BALANCED_6H("均衡（每6小时）", intervalHours = 6, wifiOnly = true, chargingOnly = false, retainDays = 14),
+    FREQUENT_1H("高频（每1小时）", intervalHours = 1, wifiOnly = false, chargingOnly = false, retainDays = 7),
+    CUSTOM("自定义", intervalHours = 12, wifiOnly = true, chargingOnly = false, retainDays = 14),
+}
+
+data class BackupStrategy(
+    val autoBackupEnabled: Boolean = false,
+    val intervalHours: Int = BackupStrategyTemplate.SAFE_DAILY.intervalHours,
+    val wifiOnly: Boolean = BackupStrategyTemplate.SAFE_DAILY.wifiOnly,
+    val chargingOnly: Boolean = BackupStrategyTemplate.SAFE_DAILY.chargingOnly,
+    val retainDays: Int = BackupStrategyTemplate.SAFE_DAILY.retainDays,
+)
+
+data class CloudBackupConfig(
+    val provider: BackupCloudProvider = BackupCloudProvider.NONE,
+    val enabled: Boolean = false,
+    val apiKey: String = "",
+    val secret: String = "",
+    val bucketOrPath: String = "",
+    val endpoint: String = "",
+) {
+    val isConfigured: Boolean
+        get() = provider != BackupCloudProvider.NONE &&
+            apiKey.isNotBlank() &&
+            bucketOrPath.isNotBlank()
+
+    val isActive: Boolean
+        get() = enabled && isConfigured
+}
+
+data class BackupConfig(
+    val localBackupEnabled: Boolean = true,
+    val cloudConfig: CloudBackupConfig = CloudBackupConfig(),
+    val strategyTemplate: BackupStrategyTemplate = BackupStrategyTemplate.SAFE_DAILY,
+    val strategy: BackupStrategy = BackupStrategy(),
+    val lastBackupTimeMillis: Long? = null,
+    val lastBackupResult: String = "",
+)
