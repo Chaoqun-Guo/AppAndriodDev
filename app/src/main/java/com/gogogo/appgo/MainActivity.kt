@@ -26,7 +26,10 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -36,6 +39,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,16 +55,16 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.gogogo.appgo.model.Achievement
 import com.gogogo.appgo.model.ExerciseType
 import com.gogogo.appgo.model.RecordingStatus
 import com.gogogo.appgo.model.StatsSummary
 import com.gogogo.appgo.model.UserProfile
-import com.gogogo.appgo.model.WorkoutSummary
 import com.gogogo.appgo.ui.AppUiState
 import com.gogogo.appgo.ui.AppViewModel
 import com.gogogo.appgo.ui.theme.AppGoTheme
 import java.time.Instant
+import java.time.LocalDate
+import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
@@ -123,6 +127,14 @@ fun AppGoApp(viewModel: AppViewModel = viewModel()) {
                     modifier = Modifier.padding(innerPadding),
                     uiState = uiState,
                     onOpenDetail = viewModel::openWorkoutDetail,
+                    onShiftWeek = viewModel::shiftWeek,
+                    onShiftMonth = viewModel::shiftMonth,
+                    onShiftYear = viewModel::shiftYear,
+                    onShiftHistoryDate = viewModel::shiftHistoryDate,
+                    onSetWeekDate = viewModel::setWeekAnchorDate,
+                    onSetMonth = viewModel::setMonthAnchor,
+                    onSetYear = viewModel::setYearAnchor,
+                    onSetHistoryDate = viewModel::setHistoryFilterDate,
                 )
 
                 AppDestination.PROFILE -> ProfileScreen(
@@ -154,6 +166,10 @@ enum class AppDestination(val label: String, val icon: Int) {
     PROFILE("我的", R.drawable.ic_account_box),
 }
 
+private enum class HistoryPickerTarget {
+    WEEK, MONTH, YEAR, HISTORY
+}
+
 @Composable
 private fun HomeScreen(
     modifier: Modifier = Modifier,
@@ -170,7 +186,7 @@ private fun HomeScreen(
                 )
             )
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
             text = "户外运动记录",
@@ -179,14 +195,28 @@ private fun HomeScreen(
             fontWeight = FontWeight.Bold,
         )
         Text(
-            text = "支持轨迹记录、自动暂停、历史统计与户外安全基础能力",
+            text = "运动选项与开始按钮位于下半区域，便于单手操作",
             style = MaterialTheme.typography.bodyMedium,
             color = Color(0xFFD6E8F0),
         )
 
+        uiState.lastWorkout?.let { summary ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("最近一次运动", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("类型: ${summary.record.type.label}")
+                    Text("距离: ${formatDistance(summary.record.totalDistanceMeters)}")
+                    Text("时长: ${formatDuration(summary.record.duration.seconds)}")
+                    Text("爬升: ${summary.record.totalElevationGainMeters.roundToInt()} m")
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.elevatedCardColors(containerColor = Color.White.copy(alpha = 0.96f)),
+            colors = CardDefaults.elevatedCardColors(containerColor = Color.White.copy(alpha = 0.98f)),
         ) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("选择运动类型", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -203,7 +233,7 @@ private fun HomeScreen(
                 Button(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(56.dp),
+                        .height(58.dp),
                     onClick = onStart,
                     shape = RoundedCornerShape(18.dp),
                 ) {
@@ -211,26 +241,6 @@ private fun HomeScreen(
                 }
             }
         }
-
-        uiState.lastWorkout?.let { summary ->
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("最近一次运动", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("类型: ${summary.record.type.label}")
-                    Text("距离: ${formatDistance(summary.record.totalDistanceMeters)}")
-                    Text("时长: ${formatDuration(summary.record.duration.seconds)}")
-                    Text("爬升: ${summary.record.totalElevationGainMeters.roundToInt()} m")
-                    Text("轨迹点: ${summary.trackPointCount}")
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.weight(1f))
-        Text(
-            text = "提示: 运动中低速(<0.5m/s)持续10秒将触发自动暂停",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color(0xFF2A4A59),
-        )
     }
 }
 
@@ -253,10 +263,12 @@ private fun RecordingScreen(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("运动状态: ${statusText(uiState.recordingStatus)}", fontWeight = FontWeight.SemiBold)
-                Text("当前类型: ${uiState.selectedType.label}")
+                Text("运动判定: ${if (uiState.movementDetected) "检测到运动" else "静止"}")
+                Text("陀螺仪: ${"%.3f".format(uiState.gyroRadPerSec)} rad/s")
                 Text("速度: ${"%.2f".format(uiState.currentSpeedMps)} m/s")
+                Text("定位: ${if (uiState.hasLocationFix) "已定位" else "未定位"}${uiState.locationAccuracyMeters?.let { " (±${it.roundToInt()}m)" } ?: ""}")
                 if (uiState.recordingStatus == RecordingStatus.AUTO_PAUSED) {
-                    Text("检测到低速持续${uiState.lowSpeedSeconds}s，已自动暂停", color = MaterialTheme.colorScheme.error)
+                    Text("连续静止${uiState.lowSpeedSeconds}s，已自动暂停", color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -270,13 +282,13 @@ private fun RecordingScreen(
             color = Color(0xFFE7F1F3),
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text("地图区域（MVP占位）\n已记录轨迹点: ${uiState.trackPoints.size}", color = Color(0xFF274450))
+                Text("轨迹区域（定位/传感器驱动）\n已记录轨迹点: ${uiState.trackPoints.size}", color = Color(0xFF274450))
             }
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("实时数据面板", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                Text("实时数据", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     DataCell("里程", formatDistance(uiState.distanceMeters))
                     DataCell("用时", formatDuration(uiState.elapsedSeconds))
@@ -336,7 +348,17 @@ private fun HistoryScreen(
     modifier: Modifier,
     uiState: AppUiState,
     onOpenDetail: (Long) -> Unit,
+    onShiftWeek: (Long) -> Unit,
+    onShiftMonth: (Long) -> Unit,
+    onShiftYear: (Long) -> Unit,
+    onShiftHistoryDate: (Long) -> Unit,
+    onSetWeekDate: (LocalDate) -> Unit,
+    onSetMonth: (YearMonth) -> Unit,
+    onSetYear: (Int) -> Unit,
+    onSetHistoryDate: (LocalDate) -> Unit,
 ) {
+    var pickerTarget by remember { mutableStateOf<HistoryPickerTarget?>(null) }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -345,13 +367,43 @@ private fun HistoryScreen(
     ) {
         Text("历史与统计", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
 
-        StatsPanel(weekly = uiState.weeklyStats, monthly = uiState.monthlyStats, yearly = uiState.yearlyStats)
+        DateSwitchRow(
+            title = "周统计",
+            value = weekDisplay(uiState.weekAnchorDate),
+            onPrev = { onShiftWeek(-1) },
+            onNext = { onShiftWeek(1) },
+            onPickDate = { pickerTarget = HistoryPickerTarget.WEEK },
+        )
+        StatsCard(summary = uiState.weeklyStats)
 
-        AchievementPanel(achievements = uiState.achievements)
+        DateSwitchRow(
+            title = "月统计",
+            value = monthDisplay(uiState.monthAnchor),
+            onPrev = { onShiftMonth(-1) },
+            onNext = { onShiftMonth(1) },
+            onPickDate = { pickerTarget = HistoryPickerTarget.MONTH },
+        )
+        StatsCard(summary = uiState.monthlyStats)
 
-        Text("历史记录（按时间倒序）", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        DateSwitchRow(
+            title = "年统计",
+            value = "${uiState.yearAnchor}",
+            onPrev = { onShiftYear(-1) },
+            onNext = { onShiftYear(1) },
+            onPickDate = { pickerTarget = HistoryPickerTarget.YEAR },
+        )
+        StatsCard(summary = uiState.yearlyStats)
+
+        DateSwitchRow(
+            title = "历史记录日期",
+            value = uiState.historyFilterDate.format(DateTimeFormatter.ISO_LOCAL_DATE),
+            onPrev = { onShiftHistoryDate(-1) },
+            onNext = { onShiftHistoryDate(1) },
+            onPickDate = { pickerTarget = HistoryPickerTarget.HISTORY },
+        )
+
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(uiState.history) { item ->
+            items(uiState.filteredHistory) { item ->
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     onClick = { onOpenDetail(item.record.id) },
@@ -363,44 +415,119 @@ private fun HistoryScreen(
                     }
                 }
             }
+            if (uiState.filteredHistory.isEmpty()) {
+                item {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "该日期暂无运动记录",
+                            modifier = Modifier.padding(14.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    pickerTarget?.let { target ->
+        val initialDate = when (target) {
+            HistoryPickerTarget.WEEK -> uiState.weekAnchorDate
+            HistoryPickerTarget.MONTH -> uiState.monthAnchor.atDay(1)
+            HistoryPickerTarget.YEAR -> LocalDate.of(uiState.yearAnchor, 1, 1)
+            HistoryPickerTarget.HISTORY -> uiState.historyFilterDate
+        }
+        DatePickerSelectionDialog(
+            title = "选择日期",
+            initialDate = initialDate,
+            onDismiss = { pickerTarget = null },
+            onConfirm = { picked ->
+                when (target) {
+                    HistoryPickerTarget.WEEK -> onSetWeekDate(picked)
+                    HistoryPickerTarget.MONTH -> onSetMonth(YearMonth.from(picked))
+                    HistoryPickerTarget.YEAR -> onSetYear(picked.year)
+                    HistoryPickerTarget.HISTORY -> onSetHistoryDate(picked)
+                }
+                pickerTarget = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun DateSwitchRow(
+    title: String,
+    value: String,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    onPickDate: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton(onClick = onPrev) { Text("上一") }
+                Text(value)
+                OutlinedButton(onClick = onNext) { Text("下一") }
+                OutlinedButton(onClick = onPickDate) { Text("选择日期") }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DatePickerSelectionDialog(
+    title: String,
+    initialDate: LocalDate,
+    onDismiss: () -> Unit,
+    onConfirm: (LocalDate) -> Unit,
+) {
+    val state = rememberDatePickerState(
+        initialSelectedDateMillis = localDateToEpochMillis(initialDate),
+    )
+    DatePickerDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {
+            Button(
+                onClick = {
+                    state.selectedDateMillis?.let { millis ->
+                        onConfirm(epochMillisToLocalDate(millis))
+                    } ?: onDismiss()
+                }
+            ) {
+                Text("确定")
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    ) {
+        Column(modifier = Modifier.padding(bottom = 12.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 12.dp, bottom = 8.dp),
+            )
+            DatePicker(state = state)
         }
     }
 }
 
 @Composable
-private fun StatsPanel(weekly: StatsSummary, monthly: StatsSummary, yearly: StatsSummary) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        StatsCard(title = "周统计", summary = weekly)
-        StatsCard(title = "月统计", summary = monthly)
-        StatsCard(title = "年统计", summary = yearly)
-    }
-}
-
-@Composable
-private fun StatsCard(title: String, summary: StatsSummary) {
+private fun StatsCard(summary: StatsSummary) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, fontWeight = FontWeight.SemiBold)
             Text("总距离: ${formatDistance(summary.totalDistanceMeters)}")
             Text("总时长: ${formatDuration(summary.totalDurationSeconds)}")
             Text("累计爬升: ${summary.totalElevationGainMeters.roundToInt()} m")
             Text("卡路里估算: ${summary.estimatedCalories} kcal")
-        }
-    }
-}
-
-@Composable
-private fun AchievementPanel(achievements: Set<Achievement>) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("成就系统", fontWeight = FontWeight.SemiBold)
-            if (achievements.isEmpty()) {
-                Text("暂无已解锁勋章")
-            } else {
-                achievements.forEach {
-                    Text("${it.title} · ${it.description}")
-                }
-            }
         }
     }
 }
@@ -429,12 +556,11 @@ private fun ProfileScreen(
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("用户档案", fontWeight = FontWeight.SemiBold)
+                Text("个人信息", fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(value = height, onValueChange = { height = it }, label = { Text("身高(cm)") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = weight, onValueChange = { weight = it }, label = { Text("体重(kg)") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = age, onValueChange = { age = it }, label = { Text("年龄") }, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(value = preference, onValueChange = { preference = it }, label = { Text("运动偏好") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = emergency, onValueChange = { emergency = it }, label = { Text("紧急联系人") }, modifier = Modifier.fillMaxWidth())
                 Button(
                     onClick = {
                         onUpdateProfile(
@@ -449,21 +575,28 @@ private fun ProfileScreen(
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("保存档案")
+                    Text("保存个人信息")
                 }
             }
         }
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("设备与安全", fontWeight = FontWeight.SemiBold)
+                Text("设备", fontWeight = FontWeight.SemiBold)
                 Text("蓝牙心率带: ${if (uiState.bluetoothConnected) "已连接" else "未连接"}")
                 OutlinedButton(onClick = onToggleBluetooth, modifier = Modifier.fillMaxWidth()) {
                     Text(if (uiState.bluetoothConnected) "断开设备" else "连接设备")
                 }
-                Text("离线地图: 已下载 0 区域（MVP占位）")
-                Text("实时位置共享: 待接入后端链接服务（MVP占位）")
-                Text("一键求助: 长按求助按钮触发短信发送（MVP占位）")
+                Text("离线地图包管理: MVP占位")
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("安全", fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(value = emergency, onValueChange = { emergency = it }, label = { Text("紧急联系人") }, modifier = Modifier.fillMaxWidth())
+                Text("实时位置共享: 待接入后端链接服务")
+                Text("一键求助: 长按按钮触发短信发送（MVP占位）")
             }
         }
     }
@@ -506,6 +639,15 @@ private fun statusText(status: RecordingStatus): String = when (status) {
     RecordingStatus.FINISHED -> "待保存"
 }
 
+private fun weekDisplay(anchor: LocalDate): String {
+    val monday = anchor.minusDays(anchor.dayOfWeek.value.toLong() - 1)
+    val sunday = monday.plusDays(6)
+    val fmt = DateTimeFormatter.ofPattern("MM-dd")
+    return "${monday.format(fmt)} ~ ${sunday.format(fmt)}"
+}
+
+private fun monthDisplay(month: YearMonth): String = month.format(DateTimeFormatter.ofPattern("yyyy-MM"))
+
 private fun formatDistance(distanceMeters: Double): String =
     if (distanceMeters >= 1000) "${"%.2f".format(distanceMeters / 1000.0)} km" else "${distanceMeters.roundToInt()} m"
 
@@ -526,3 +668,9 @@ private fun formatPace(secondsPerKm: Int): String {
 private fun formatDate(millis: Long): String =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
         .format(Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDateTime())
+
+private fun localDateToEpochMillis(date: LocalDate): Long =
+    date.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+private fun epochMillisToLocalDate(millis: Long): LocalDate =
+    Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
