@@ -60,6 +60,20 @@ data class WorkoutSummary(
     val trackPointCount: Int,
 )
 
+data class SegmentPace(
+    val segmentIndex: Int,
+    val distanceMeters: Double,
+    val durationSeconds: Long,
+    val paceSecondsPerKm: Int,
+)
+
+data class HeartRateZoneStat(
+    val zoneLabel: String,
+    val minInclusive: Int,
+    val maxInclusive: Int,
+    val durationSeconds: Long,
+)
+
 data class StatsSummary(
     val totalDistanceMeters: Double,
     val totalDurationSeconds: Long,
@@ -120,9 +134,26 @@ data class AppSettings(
         RecordingMetric.ELEVATION,
         RecordingMetric.HEART_RATE,
     ),
+    val homePinEnabled: Boolean = true,
+    val homePinText: String = "GO!",
+    val showTrackArea: Boolean = true,
+    val weeklyGoalKm: Int = 30,
+    val defaultPrivacyMode: PrivacyMode = PrivacyMode.FRIENDS,
     val serviceIntegration: ServiceIntegrationConfig = ServiceIntegrationConfig(),
     val backupConfig: BackupConfig = BackupConfig(),
 )
+
+enum class SensorWorkStatus {
+    GOOD,
+    WARN,
+    BAD,
+}
+
+enum class PrivacyMode(val label: String) {
+    PUBLIC("公开"),
+    FRIENDS("仅好友"),
+    PRIVATE("仅自己"),
+}
 
 enum class BackupCloudProvider(val label: String) {
     NONE("不使用云端"),
