@@ -160,6 +160,11 @@ fun AppGoApp(viewModel: AppViewModel = viewModel()) {
                     onUpdateProfile = viewModel::updateProfile,
                 )
 
+                AppDestination.PANEL -> DataPanelScreen(
+                    modifier = Modifier.padding(innerPadding),
+                    uiState = uiState,
+                )
+
                 AppDestination.SETTINGS -> SettingsScreen(
                     modifier = Modifier.padding(innerPadding),
                     uiState = uiState,
@@ -215,6 +220,7 @@ enum class AppDestination(val label: String, val icon: Int) {
     RECORD("记录", R.drawable.ic_favorite),
     HISTORY("历史", R.drawable.ic_favorite),
     PROFILE("我的", R.drawable.ic_account_box),
+    PANEL("面板", R.drawable.ic_home),
     SETTINGS("设置", R.drawable.ic_account_box),
 }
 
@@ -473,6 +479,104 @@ private fun SensorWorkStatusItem(title: String, status: SensorWorkStatus) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("●", color = color)
         Text(title, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun DataPanelScreen(
+    modifier: Modifier = Modifier,
+    uiState: AppUiState,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(12.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text("实时数据面板", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("海拔高度", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text("${uiState.currentAltitude.roundToInt()} m", style = MaterialTheme.typography.headlineMedium)
+                SensorWorkStatusItem("海拔传感器", uiState.altitudeWorkStatus)
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("经纬度", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "纬度: ${uiState.currentLatitude?.let { "%.6f".format(it) } ?: "--"}",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    "经度: ${uiState.currentLongitude?.let { "%.6f".format(it) } ?: "--"}",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                Text(
+                    if (uiState.hasLocationFix) "定位状态: 正常" else "定位状态: 未获取",
+                    color = if (uiState.hasLocationFix) Color(0xFF2E7D32) else Color(0xFFC62828),
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("指南针", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text("${uiState.azimuthDegree.roundToInt()}° · ${azimuthDirection(uiState.azimuthDegree)}", style = MaterialTheme.typography.headlineMedium)
+                SensorWorkStatusItem("方位", uiState.azimuthWorkStatus)
+                SensorWorkStatusItem("指南针", uiState.compassWorkStatus)
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("水平仪", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text("Pitch ${"%.1f".format(uiState.pitchDegree)}° · Roll ${"%.1f".format(uiState.rollDegree)}°")
+                LevelIndicator(
+                    pitchDegree = uiState.pitchDegree,
+                    rollDegree = uiState.rollDegree,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LevelIndicator(
+    pitchDegree: Float,
+    rollDegree: Float,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = size.minDimension * 0.35f
+        drawRect(color = Color(0xFFF7FBFC), size = size)
+        drawCircle(color = Color(0xFFB0BEC5), radius = radius, center = center, style = Stroke(width = 4f))
+        drawLine(
+            color = Color(0xFF90A4AE),
+            start = Offset(center.x - radius, center.y),
+            end = Offset(center.x + radius, center.y),
+            strokeWidth = 2f,
+        )
+        drawLine(
+            color = Color(0xFF90A4AE),
+            start = Offset(center.x, center.y - radius),
+            end = Offset(center.x, center.y + radius),
+            strokeWidth = 2f,
+        )
+
+        val maxOffset = radius * 0.75f
+        val bubbleX = center.x + (rollDegree.coerceIn(-30f, 30f) / 30f) * maxOffset
+        val bubbleY = center.y + (pitchDegree.coerceIn(-30f, 30f) / 30f) * maxOffset
+        val bubbleCentered = kotlin.math.abs(pitchDegree) <= 2f && kotlin.math.abs(rollDegree) <= 2f
+        val bubbleColor = if (bubbleCentered) Color(0xFF2E7D32) else Color(0xFFF9A825)
+        drawCircle(color = bubbleColor, radius = 14f, center = Offset(bubbleX, bubbleY))
     }
 }
 
@@ -1379,3 +1483,17 @@ private fun localDateToEpochMillis(date: LocalDate): Long =
 
 private fun epochMillisToLocalDate(millis: Long): LocalDate =
     Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
+
+private fun azimuthDirection(azimuth: Float): String {
+    val normalized = ((azimuth % 360) + 360) % 360
+    return when (normalized) {
+        in 337.5f..360f, in 0f..22.5f -> "北"
+        in 22.5f..67.5f -> "东北"
+        in 67.5f..112.5f -> "东"
+        in 112.5f..157.5f -> "东南"
+        in 157.5f..202.5f -> "南"
+        in 202.5f..247.5f -> "西南"
+        in 247.5f..292.5f -> "西"
+        else -> "西北"
+    }
+}

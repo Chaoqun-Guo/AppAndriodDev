@@ -70,6 +70,10 @@ data class AppUiState(
     val movementDetected: Boolean = false,
     val gyroRadPerSec: Float = 0f,
     val azimuthDegree: Float = 0f,
+    val pitchDegree: Float = 0f,
+    val rollDegree: Float = 0f,
+    val currentLatitude: Double? = null,
+    val currentLongitude: Double? = null,
     val hasLocationFix: Boolean = false,
     val locationAccuracyMeters: Float? = null,
     val gyroWorkStatus: SensorWorkStatus = SensorWorkStatus.BAD,
@@ -127,6 +131,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var latestLocation: Location? = null
     private var latestGyroMagnitude = 0f
     private var latestAzimuthDegrees = 0f
+    private var latestPitchDegrees = 0f
+    private var latestRollDegrees = 0f
     private var lastLocationMillis = 0L
     private var lastGyroMillis = 0L
     private var lastAzimuthMillis = 0L
@@ -141,6 +147,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             lastLocationMillis = System.currentTimeMillis()
             _uiState.update {
                 it.copy(
+                    currentLatitude = location.latitude,
+                    currentLongitude = location.longitude,
                     hasLocationFix = true,
                     locationAccuracyMeters = if (location.hasAccuracy()) location.accuracy else null,
                 )
@@ -175,9 +183,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             SensorManager.getOrientation(rotation, orientation)
             var azimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
             if (azimuth < 0) azimuth += 360f
+            val pitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
+            val roll = Math.toDegrees(orientation[2].toDouble()).toFloat()
             latestAzimuthDegrees = azimuth
+            latestPitchDegrees = pitch
+            latestRollDegrees = roll
             lastAzimuthMillis = System.currentTimeMillis()
-            _uiState.update { it.copy(azimuthDegree = azimuth) }
+            _uiState.update {
+                it.copy(
+                    azimuthDegree = azimuth,
+                    pitchDegree = pitch,
+                    rollDegree = roll,
+                )
+            }
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -1047,6 +1065,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         lowSpeedSeconds = nextLowSpeed,
                         movementDetected = movementDetected,
                         azimuthDegree = latestAzimuthDegrees,
+                        pitchDegree = latestPitchDegrees,
+                        rollDegree = latestRollDegrees,
                         gyroWorkStatus = gyroStatus,
                         azimuthWorkStatus = azimuthStatus,
                         compassWorkStatus = compassStatus,
