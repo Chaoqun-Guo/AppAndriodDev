@@ -67,6 +67,33 @@ data class SegmentPace(
     val paceSecondsPerKm: Int,
 )
 
+data class DetailReplayPoint(
+    val index: Int,
+    val latitude: Double,
+    val longitude: Double,
+    val altitude: Double,
+    val cumulativeDistanceMeters: Double,
+    val speedMps: Double,
+    val timestampMillis: Long,
+    val heartRate: Int?,
+)
+
+enum class DetailReplayDirection(val label: String) {
+    FORWARD("正向"),
+    REVERSE("反向"),
+}
+
+enum class DetailReplaySpeed(
+    val label: String,
+    val factor: Float,
+    val frameDelayMillis: Long,
+) {
+    X0_5("0.5x", 0.5f, 200L),
+    X1("1x", 1f, 100L),
+    X2("2x", 2f, 50L),
+    X4("4x", 4f, 25L),
+}
+
 data class HeartRateZoneStat(
     val zoneLabel: String,
     val minInclusive: Int,
@@ -93,7 +120,7 @@ data class UserProfile(
     val weightKg: Int = 65,
     val age: Int = 28,
     val preferences: String = "徒步、跑步",
-    val emergencyContact: String = "",
+    val shareRecipientEmails: List<String> = emptyList(),
 )
 
 enum class RecordingMetric(val label: String) {
@@ -107,23 +134,80 @@ enum class RecordingMetric(val label: String) {
     MOVEMENT("运动状态"),
 }
 
+enum class HistoryDisplayField(val label: String) {
+    DISTANCE("距离"),
+    DURATION("时长"),
+    ELEVATION("爬升"),
+    TRACK_POINTS("轨迹点"),
+    AVG_HEART_RATE("平均心率"),
+}
+
 data class ServiceIntegrationConfig(
+    val mapUseSystemService: Boolean = true,
     val mapApiKey: String = "",
     val mapEnabled: Boolean = false,
     val weatherApiKey: String = "",
     val weatherEnabled: Boolean = false,
     val shareApiKey: String = "",
     val shareEnabled: Boolean = false,
+    val smtpHost: String = "",
+    val smtpPort: Int = 587,
+    val smtpUsername: String = "",
+    val smtpPassword: String = "",
+    val smtpFromEmail: String = "",
+    val smtpUseTls: Boolean = true,
+    val smtpEnabled: Boolean = false,
 ) {
     val mapActive: Boolean
-        get() = mapEnabled && mapApiKey.isNotBlank()
+        get() = mapUseSystemService || (mapEnabled && mapApiKey.isNotBlank())
 
     val weatherActive: Boolean
         get() = weatherEnabled && weatherApiKey.isNotBlank()
 
     val shareActive: Boolean
         get() = shareEnabled && shareApiKey.isNotBlank()
+
+    val smtpConfigured: Boolean
+        get() = smtpHost.isNotBlank() &&
+            smtpPort in 1..65535 &&
+            smtpUsername.isNotBlank() &&
+            smtpPassword.isNotBlank() &&
+            smtpFromEmail.isNotBlank()
+
+    val smtpActive: Boolean
+        get() = smtpEnabled && smtpConfigured
 }
+
+data class WeatherSnapshot(
+    val source: String = "手机天气服务",
+    val temperatureC: Float? = null,
+    val feelsLikeC: Float? = null,
+    val precipitationMm: Float? = null,
+    val humidityPercent: Int? = null,
+    val pressureHpa: Float? = null,
+    val windSpeedMs: Float? = null,
+    val windGustMs: Float? = null,
+    val windDirectionDegree: Int? = null,
+    val uvIndex: Float? = null,
+    val visibilityKm: Float? = null,
+    val cloudCoverPercent: Int? = null,
+    val dewPointC: Float? = null,
+    val sunriseTimeText: String = "--",
+    val sunsetTimeText: String = "--",
+    val updateTimeMillis: Long = 0L,
+)
+
+data class WeatherDailyForecast(
+    val dateText: String,
+    val weatherLabel: String,
+    val minTempC: Float,
+    val maxTempC: Float,
+    val precipitationMm: Float,
+    val windSpeedMs: Float,
+    val windDirectionDegree: Int?,
+    val windGustMs: Float,
+    val visibilityKm: Float,
+)
 
 data class AppSettings(
     val visibleMetrics: Set<RecordingMetric> = setOf(
@@ -134,11 +218,18 @@ data class AppSettings(
         RecordingMetric.ELEVATION,
         RecordingMetric.HEART_RATE,
     ),
-    val homePinEnabled: Boolean = true,
-    val homePinText: String = "GO!",
     val showTrackArea: Boolean = true,
+    val panelRefreshIntervalSeconds: Int = 2,
+    val compassAutoCalibrationEnabled: Boolean = true,
     val weeklyGoalKm: Int = 30,
-    val defaultPrivacyMode: PrivacyMode = PrivacyMode.FRIENDS,
+    val compassCalibrationOffsetDegrees: Float = 0f,
+    val bottomNavOrder: List<String> = listOf("PANEL", "HOME", "RECORD", "PROFILE"),
+    val myPageOrder: List<String> = listOf("device", "history", "settings"),
+    val visibleHistoryFields: Set<HistoryDisplayField> = setOf(
+        HistoryDisplayField.DISTANCE,
+        HistoryDisplayField.DURATION,
+        HistoryDisplayField.ELEVATION,
+    ),
     val serviceIntegration: ServiceIntegrationConfig = ServiceIntegrationConfig(),
     val backupConfig: BackupConfig = BackupConfig(),
 )
@@ -147,12 +238,6 @@ enum class SensorWorkStatus {
     GOOD,
     WARN,
     BAD,
-}
-
-enum class PrivacyMode(val label: String) {
-    PUBLIC("公开"),
-    FRIENDS("仅好友"),
-    PRIVATE("仅自己"),
 }
 
 enum class BackupCloudProvider(val label: String) {
@@ -207,4 +292,23 @@ data class BackupConfig(
     val strategy: BackupStrategy = BackupStrategy(),
     val lastBackupTimeMillis: Long? = null,
     val lastBackupResult: String = "",
+)
+
+data class BreadcrumbPoint(
+    val timestampMillis: Long,
+    val latitude: Double,
+    val longitude: Double,
+)
+
+enum class BacktrackDirection(val label: String) {
+    FORWARD("正向"),
+    REVERSE("反向"),
+}
+
+data class BacktrackRouteSummary(
+    val id: Long,
+    val name: String,
+    val createdAtMillis: Long,
+    val sourceWorkoutId: Long?,
+    val nodeCount: Int,
 )

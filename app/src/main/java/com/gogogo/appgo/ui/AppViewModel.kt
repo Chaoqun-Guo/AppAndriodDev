@@ -9,25 +9,40 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.GeomagneticField
+import android.location.Address
+import android.location.Geocoder
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Looper
+import android.util.Patterns
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gogogo.appgo.data.WorkoutRepository
+import com.gogogo.appgo.domain.history.HistoryDomain
+import com.gogogo.appgo.domain.replay.ReplayDomain
+import com.gogogo.appgo.domain.share.SmtpEmailSender
+import com.gogogo.appgo.domain.weather.WeatherDomain
 import com.gogogo.appgo.model.BackupCloudProvider
 import com.gogogo.appgo.model.BackupConfig
+import com.gogogo.appgo.model.BacktrackDirection
+import com.gogogo.appgo.model.BacktrackRouteSummary
 import com.gogogo.appgo.model.BackupStrategy
 import com.gogogo.appgo.model.BackupStrategyTemplate
+import com.gogogo.appgo.model.BreadcrumbPoint
 import com.gogogo.appgo.model.CloudBackupConfig
 import com.gogogo.appgo.model.ExerciseType
 import com.gogogo.appgo.model.HeartRateZoneStat
+import com.gogogo.appgo.model.HistoryDisplayField
+import com.gogogo.appgo.model.DetailReplayDirection
+import com.gogogo.appgo.model.DetailReplayPoint
+import com.gogogo.appgo.model.DetailReplaySpeed
 import com.gogogo.appgo.model.MarkerPoint
 import com.gogogo.appgo.model.AppSettings
-import com.gogogo.appgo.model.PrivacyMode
 import com.gogogo.appgo.model.RecordingStatus
 import com.gogogo.appgo.model.RecordingMetric
 import com.gogogo.appgo.model.SensorWorkStatus
@@ -36,25 +51,33 @@ import com.gogogo.appgo.model.ServiceIntegrationConfig
 import com.gogogo.appgo.model.StatsSummary
 import com.gogogo.appgo.model.TrackPoint
 import com.gogogo.appgo.model.UserProfile
+import com.gogogo.appgo.model.WeatherDailyForecast
+import com.gogogo.appgo.model.WeatherSnapshot
 import com.gogogo.appgo.model.WorkoutRecord
 import com.gogogo.appgo.model.WorkoutSummary
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.File
-import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.YearMonth
-import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.pow
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlin.random.Random
+import kotlin.coroutines.resume
 
 data class AppUiState(
     val selectedType: ExerciseType = ExerciseType.HIKING,
@@ -74,19 +97,42 @@ data class AppUiState(
     val rollDegree: Float = 0f,
     val currentLatitude: Double? = null,
     val currentLongitude: Double? = null,
+    val currentAddressText: String = "",
+    val weather: WeatherSnapshot = WeatherSnapshot(),
+    val weatherForecast3d: List<WeatherDailyForecast> = emptyList(),
     val hasLocationFix: Boolean = false,
     val locationAccuracyMeters: Float? = null,
     val gyroWorkStatus: SensorWorkStatus = SensorWorkStatus.BAD,
     val azimuthWorkStatus: SensorWorkStatus = SensorWorkStatus.BAD,
     val compassWorkStatus: SensorWorkStatus = SensorWorkStatus.BAD,
     val altitudeWorkStatus: SensorWorkStatus = SensorWorkStatus.BAD,
+    val compassCalibrationMode: Boolean = false,
+    val compassBacktrackMode: Boolean = false,
+    val compassBacktrackTargetIndex: Int = -1,
+    val compassBacktrackBearingDegree: Float? = null,
+    val compassBacktrackDistanceMeters: Double? = null,
+    val compassBacktrackDeviationMeters: Double? = null,
+    val compassBacktrackDeviationStatus: SensorWorkStatus = SensorWorkStatus.WARN,
+    val compassBacktrackPointerDeviationDegree: Float? = null,
+    val compassBacktrackPointerDeviationStatus: SensorWorkStatus = SensorWorkStatus.WARN,
+    val backtrackDirection: BacktrackDirection = BacktrackDirection.REVERSE,
+    val startWithPathRecordingOnWorkout: Boolean = false,
+    val workoutPathRecordingEnabled: Boolean = false,
+    val backtrackRoutes: List<BacktrackRouteSummary> = emptyList(),
+    val selectedBacktrackRouteId: Long? = null,
+    val activeBacktrackNodeCount: Int = 0,
+    val activeBacktrackRouteName: String = "实时轨迹",
+    val activeBacktrackNodes: List<BreadcrumbPoint> = emptyList(),
+    val isBacktrackRoutePersisting: Boolean = false,
     val trackPoints: List<TrackPoint> = emptyList(),
     val markerPoints: List<MarkerPoint> = emptyList(),
     val history: List<WorkoutSummary> = emptyList(),
     val filteredHistory: List<WorkoutSummary> = emptyList(),
+    val historyVisibleCount: Int = 5,
     val historyTypeFilter: ExerciseType? = null,
     val selectedWorkoutId: Long? = null,
     val selectedWorkoutTrack: List<TrackPoint> = emptyList(),
+    val selectedWorkoutReplayPoints: List<DetailReplayPoint> = emptyList(),
     val selectedWorkoutSummary: WorkoutSummary? = null,
     val selectedWorkoutSegmentPace: List<SegmentPace> = emptyList(),
     val selectedWorkoutHeartRateZones: List<HeartRateZoneStat> = emptyList(),
@@ -94,13 +140,17 @@ data class AppUiState(
     val selectedWorkoutHeartRateSeries: List<Float> = emptyList(),
     val lastWorkout: WorkoutSummary? = null,
     val weeklyStats: StatsSummary = StatsSummary(0.0, 0, 0.0, 0),
+    val dailyStats: StatsSummary = StatsSummary(0.0, 0, 0.0, 0),
     val monthlyStats: StatsSummary = StatsSummary(0.0, 0, 0.0, 0),
     val yearlyStats: StatsSummary = StatsSummary(0.0, 0, 0.0, 0),
+    val customRangeStats: StatsSummary = StatsSummary(0.0, 0, 0.0, 0),
     val weeklyDistanceMeters: Double = 0.0,
     val weekAnchorDate: LocalDate = LocalDate.now(),
     val monthAnchor: YearMonth = YearMonth.now(),
     val yearAnchor: Int = LocalDate.now().year,
     val historyFilterDate: LocalDate = LocalDate.now(),
+    val customRangeStartDate: LocalDate = LocalDate.now(),
+    val customRangeEndDate: LocalDate = LocalDate.now(),
     val summaryDialogVisible: Boolean = false,
     val pendingRecord: WorkoutRecord? = null,
     val profile: UserProfile = UserProfile(),
@@ -110,6 +160,17 @@ data class AppUiState(
     val backupFiles: List<String> = emptyList(),
     val selectedBackupFileName: String? = null,
     val selectedBackupFileContent: String = "",
+    val breadcrumbTrail: List<BreadcrumbPoint> = emptyList(),
+    val onlineSharingEnabled: Boolean = false,
+    val shareEmailStatus: String = "",
+    val detailReplayPanelVisible: Boolean = false,
+    val detailReplayAnchorIndex: Int = -1,
+    val detailReplayCurrentIndex: Int = -1,
+    val detailReplayDirection: DetailReplayDirection = DetailReplayDirection.FORWARD,
+    val detailReplayPlaying: Boolean = false,
+    val detailReplaySpeed: DetailReplaySpeed = DetailReplaySpeed.X1,
+    val detailReplayNotice: String = "",
+    val detailReplayNoticeVersion: Long = 0L,
 )
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
@@ -128,9 +189,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var startTimeMillis: Long = 0
     private var tickerJob: Job? = null
+    private var detailReplayJob: Job? = null
+    private var monitoringInputs = false
     private var latestLocation: Location? = null
     private var latestGyroMagnitude = 0f
     private var latestAzimuthDegrees = 0f
+    private var latestAzimuthRawDegrees = 0f
+    private var latestMagneticHeadingDegrees = 0f
     private var latestPitchDegrees = 0f
     private var latestRollDegrees = 0f
     private var lastLocationMillis = 0L
@@ -138,21 +203,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var lastAzimuthMillis = 0L
     private var lastCompassMillis = 0L
     private var lastAltitudeSensorMillis = 0L
+    private var latestPressureHpa: Float? = null
+    private var lastWeatherUpdateMillis = 0L
+    private var lastAddressResolveMillis = 0L
     private var fallbackLat = 31.2304
     private var fallbackLon = 121.4737
+    private val breadcrumbTrail = mutableListOf<BreadcrumbPoint>()
+    private val activeBacktrackNodes = mutableListOf<BreadcrumbPoint>()
+    private val routeNameFormatter = DateTimeFormatter.ofPattern("yyyyMMdd_HHmm")
 
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             latestLocation = location
             lastLocationMillis = System.currentTimeMillis()
+            updateAzimuthDisplay()
+            appendBreadcrumb(location)
+            maybeResolveAddress(location)
+            updateBacktrackFromLocation(location)
             _uiState.update {
                 it.copy(
                     currentLatitude = location.latitude,
                     currentLongitude = location.longitude,
                     hasLocationFix = true,
                     locationAccuracyMeters = if (location.hasAccuracy()) location.accuracy else null,
+                    breadcrumbTrail = breadcrumbTrail.toList(),
+                    activeBacktrackNodes = activeBacktrackNodes.toList(),
                 )
             }
+            refreshWeatherSnapshot(location)
         }
 
         override fun onProviderEnabled(provider: String) = Unit
@@ -181,17 +259,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             SensorManager.getRotationMatrixFromVector(rotation, event.values)
             val orientation = FloatArray(3)
             SensorManager.getOrientation(rotation, orientation)
-            var azimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
-            if (azimuth < 0) azimuth += 360f
+            val azimuth = Math.toDegrees(orientation[0].toDouble()).toFloat()
             val pitch = Math.toDegrees(orientation[1].toDouble()).toFloat()
             val roll = Math.toDegrees(orientation[2].toDouble()).toFloat()
-            latestAzimuthDegrees = azimuth
+            latestAzimuthRawDegrees = azimuth
             latestPitchDegrees = pitch
             latestRollDegrees = roll
             lastAzimuthMillis = System.currentTimeMillis()
+            updateAzimuthDisplay()
             _uiState.update {
                 it.copy(
-                    azimuthDegree = azimuth,
                     pitchDegree = pitch,
                     rollDegree = roll,
                 )
@@ -208,7 +285,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val y = event.values.getOrNull(1) ?: 0f
             val heading = Math.toDegrees(atan2(y.toDouble(), x.toDouble())).toFloat()
             if (heading.isFinite()) {
+                latestMagneticHeadingDegrees = normalizeDegrees(heading)
                 lastCompassMillis = System.currentTimeMillis()
+                updateAzimuthDisplay()
             }
         }
 
@@ -219,6 +298,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         override fun onSensorChanged(event: SensorEvent) {
             if (event.sensor.type != Sensor.TYPE_PRESSURE) return
             lastAltitudeSensorMillis = System.currentTimeMillis()
+            val pressure = event.values.getOrNull(0) ?: return
+            latestPressureHpa = pressure
+            val altitude = SensorManager.getAltitude(SensorManager.PRESSURE_STANDARD_ATMOSPHERE, pressure).toDouble()
+            _uiState.update { it.copy(currentAltitude = altitude) }
+            refreshWeatherSnapshot()
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -226,18 +310,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         loadSettings()
+        loadProfile()
         refreshFromDatabase()
+        refreshBacktrackRoutes()
         refreshBackupFiles()
+        startInputs(forceRestartLocation = true)
+        refreshWeatherSnapshot(force = true)
     }
 
     fun selectExerciseType(type: ExerciseType) {
         _uiState.update { it.copy(selectedType = type) }
     }
 
-    fun startWorkout() {
+    fun startWorkout(enablePathRecording: Boolean = _uiState.value.startWithPathRecordingOnWorkout) {
         if (_uiState.value.recordingStatus == RecordingStatus.RECORDING) return
 
         startTimeMillis = System.currentTimeMillis()
+        if (enablePathRecording) {
+            prepareBacktrackNodesForMode()
+        }
         _uiState.update {
             it.copy(
                 recordingStatus = RecordingStatus.RECORDING,
@@ -254,9 +345,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 markerPoints = emptyList(),
                 summaryDialogVisible = false,
                 pendingRecord = null,
+                workoutPathRecordingEnabled = enablePathRecording,
+                compassBacktrackMode = enablePathRecording && activeBacktrackNodes.size >= 2,
+                activeBacktrackNodeCount = activeBacktrackNodes.size,
             )
         }
-        startInputs()
+        if (enablePathRecording) {
+            setNearestBacktrackTarget()
+            updateBacktrackFromLocation(latestLocation)
+        }
         startTicker()
     }
 
@@ -273,8 +370,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun pauseWorkout() {
+        _uiState.update { state ->
+            if (state.recordingStatus == RecordingStatus.RECORDING) {
+                state.copy(recordingStatus = RecordingStatus.PAUSED)
+            } else {
+                state
+            }
+        }
+    }
+
+    fun resumeWorkout() {
+        _uiState.update { state ->
+            if (state.recordingStatus == RecordingStatus.PAUSED || state.recordingStatus == RecordingStatus.AUTO_PAUSED) {
+                state.copy(recordingStatus = RecordingStatus.RECORDING, lowSpeedSeconds = 0)
+            } else {
+                state
+            }
+        }
+    }
+
     fun endWorkout() {
-        stopTickerAndInputs()
+        stopTickerOnly()
         val now = System.currentTimeMillis()
         val state = _uiState.value
         if (state.elapsedSeconds < 3 || state.trackPoints.size < 2) {
@@ -314,19 +431,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun saveWorkout() {
         val state = _uiState.value
         val record = state.pendingRecord ?: return
-        repository.saveWorkout(record, state.trackPoints, state.markerPoints)
+        val savedWorkoutId = repository.saveWorkout(record, state.trackPoints, state.markerPoints)
+        val routeNodes = state.trackPoints.map {
+            BreadcrumbPoint(
+                timestampMillis = it.timestampMillis,
+                latitude = it.latitude,
+                longitude = it.longitude,
+            )
+        }
+        if (state.workoutPathRecordingEnabled && routeNodes.size >= 2) {
+            repository.saveBacktrackRoute(
+                routeName = "回溯_运动_${savedWorkoutId}",
+                sourceWorkoutId = savedWorkoutId,
+                nodes = routeNodes,
+            )
+        }
         _uiState.update {
             it.copy(
                 recordingStatus = RecordingStatus.IDLE,
                 summaryDialogVisible = false,
                 pendingRecord = null,
+                workoutPathRecordingEnabled = false,
             )
         }
         refreshFromDatabase()
+        refreshBacktrackRoutes()
     }
 
     fun discardWorkout() {
-        stopTickerAndInputs()
+        stopTickerOnly()
         _uiState.update {
             it.copy(
                 recordingStatus = RecordingStatus.IDLE,
@@ -334,6 +467,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 pendingRecord = null,
                 trackPoints = emptyList(),
                 markerPoints = emptyList(),
+                workoutPathRecordingEnabled = false,
             )
         }
     }
@@ -356,15 +490,169 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val track = repository.loadTrackPoints(workoutId)
         val summary = _uiState.value.history.firstOrNull { it.record.id == workoutId }
         val analysis = analyzeWorkoutTrack(track)
+        val replayPoints = ReplayDomain.buildReplayPoints(track)
+        detailReplayJob?.cancel()
         _uiState.update {
             it.copy(
                 selectedWorkoutId = workoutId,
                 selectedWorkoutTrack = track,
+                selectedWorkoutReplayPoints = replayPoints,
                 selectedWorkoutSummary = summary,
                 selectedWorkoutSegmentPace = analysis.segmentPace,
                 selectedWorkoutHeartRateZones = analysis.heartRateZones,
                 selectedWorkoutPaceSeries = analysis.paceSeries,
                 selectedWorkoutHeartRateSeries = analysis.heartRateSeries,
+                detailReplayPanelVisible = false,
+                detailReplayAnchorIndex = -1,
+                detailReplayCurrentIndex = -1,
+                detailReplayDirection = DetailReplayDirection.FORWARD,
+                detailReplayPlaying = false,
+            )
+        }
+    }
+
+    fun closeWorkoutDetail() {
+        detailReplayJob?.cancel()
+        _uiState.update {
+            it.copy(
+                selectedWorkoutId = null,
+                selectedWorkoutTrack = emptyList(),
+                selectedWorkoutReplayPoints = emptyList(),
+                selectedWorkoutSummary = null,
+                selectedWorkoutSegmentPace = emptyList(),
+                selectedWorkoutHeartRateZones = emptyList(),
+                selectedWorkoutPaceSeries = emptyList(),
+                selectedWorkoutHeartRateSeries = emptyList(),
+                detailReplayPanelVisible = false,
+                detailReplayAnchorIndex = -1,
+                detailReplayCurrentIndex = -1,
+                detailReplayPlaying = false,
+            )
+        }
+    }
+
+    fun clearDetailReplayNotice() {
+        _uiState.update { it.copy(detailReplayNotice = "") }
+    }
+
+    fun selectReplayAnchorByMapLongPress(latitude: Double, longitude: Double) {
+        val points = _uiState.value.selectedWorkoutReplayPoints
+        if (points.size < 2) {
+            notifyDetailReplay("轨迹数据不足")
+            return
+        }
+        val nearest = points.minByOrNull { p ->
+            haversineMeters(latitude, longitude, p.latitude, p.longitude)
+        } ?: return
+        val nearestDistance = haversineMeters(latitude, longitude, nearest.latitude, nearest.longitude)
+        if (nearestDistance > 30.0) {
+            notifyDetailReplay("附近无轨迹点，请长按轨迹线附近")
+            return
+        }
+        detailReplayJob?.cancel()
+        _uiState.update {
+            it.copy(
+                detailReplayPanelVisible = true,
+                detailReplayAnchorIndex = nearest.index,
+                detailReplayCurrentIndex = nearest.index,
+                detailReplayDirection = DetailReplayDirection.FORWARD,
+                detailReplayPlaying = false,
+            )
+        }
+    }
+
+    fun startDetailReplayForward() {
+        val state = _uiState.value
+        val points = state.selectedWorkoutReplayPoints
+        val anchor = state.detailReplayAnchorIndex
+        if (points.size < 2 || anchor !in points.indices) {
+            notifyDetailReplay("轨迹数据不足")
+            return
+        }
+        if (anchor >= points.lastIndex) {
+            notifyDetailReplay("已位于终点")
+            return
+        }
+        _uiState.update {
+            it.copy(
+                detailReplayPanelVisible = true,
+                detailReplayDirection = DetailReplayDirection.FORWARD,
+                detailReplayCurrentIndex = anchor,
+                detailReplayPlaying = true,
+            )
+        }
+        startDetailReplayLoop()
+    }
+
+    fun startDetailReplayReverse() {
+        val state = _uiState.value
+        val points = state.selectedWorkoutReplayPoints
+        val anchor = state.detailReplayAnchorIndex
+        if (points.size < 2 || anchor !in points.indices) {
+            notifyDetailReplay("轨迹数据不足")
+            return
+        }
+        if (anchor <= 0) {
+            notifyDetailReplay("已位于起点")
+            return
+        }
+        _uiState.update {
+            it.copy(
+                detailReplayPanelVisible = true,
+                detailReplayDirection = DetailReplayDirection.REVERSE,
+                detailReplayCurrentIndex = anchor,
+                detailReplayPlaying = true,
+            )
+        }
+        startDetailReplayLoop()
+    }
+
+    fun toggleDetailReplayPlayPause() {
+        val state = _uiState.value
+        if (state.detailReplayAnchorIndex !in state.selectedWorkoutReplayPoints.indices) return
+        val next = !state.detailReplayPlaying
+        _uiState.update { it.copy(detailReplayPlaying = next) }
+        if (next) startDetailReplayLoop() else detailReplayJob?.cancel()
+    }
+
+    fun setDetailReplaySpeed(speed: DetailReplaySpeed) {
+        _uiState.update { it.copy(detailReplaySpeed = speed) }
+    }
+
+    fun switchDetailReplayDirection() {
+        _uiState.update {
+            it.copy(
+                detailReplayDirection = if (it.detailReplayDirection == DetailReplayDirection.FORWARD) {
+                    DetailReplayDirection.REVERSE
+                } else {
+                    DetailReplayDirection.FORWARD
+                }
+            )
+        }
+    }
+
+    fun seekDetailReplayByProgress(progress: Float) {
+        val state = _uiState.value
+        val points = state.selectedWorkoutReplayPoints
+        if (points.isEmpty()) return
+        val index = ((points.lastIndex) * progress.coerceIn(0f, 1f)).roundToInt().coerceIn(0, points.lastIndex)
+        detailReplayJob?.cancel()
+        _uiState.update {
+            it.copy(
+                detailReplayCurrentIndex = index,
+                detailReplayPlaying = false,
+            )
+        }
+    }
+
+    fun exitDetailReplayPanel() {
+        detailReplayJob?.cancel()
+        _uiState.update {
+            it.copy(
+                detailReplayPanelVisible = false,
+                detailReplayAnchorIndex = -1,
+                detailReplayCurrentIndex = -1,
+                detailReplayPlaying = false,
             )
         }
     }
@@ -400,22 +688,70 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun shiftHistoryDate(step: Long) {
-        _uiState.update { it.copy(historyFilterDate = it.historyFilterDate.plusDays(step)) }
+        _uiState.update {
+            val nextDate = it.historyFilterDate.plusDays(step)
+            it.copy(
+                historyFilterDate = nextDate,
+                historyVisibleCount = 5,
+                weekAnchorDate = nextDate,
+                monthAnchor = YearMonth.from(nextDate),
+                yearAnchor = nextDate.year,
+            )
+        }
         refreshDerivedStatsAndFilters()
     }
 
     fun setHistoryFilterDate(date: LocalDate) {
-        _uiState.update { it.copy(historyFilterDate = date) }
+        _uiState.update {
+            it.copy(
+                historyFilterDate = date,
+                historyVisibleCount = 5,
+                weekAnchorDate = date,
+                monthAnchor = YearMonth.from(date),
+                yearAnchor = date.year,
+            )
+        }
+        refreshDerivedStatsAndFilters()
+    }
+
+    fun setCustomRangeStartDate(date: LocalDate) {
+        _uiState.update {
+            val end = if (date.isAfter(it.customRangeEndDate)) date else it.customRangeEndDate
+            it.copy(customRangeStartDate = date, customRangeEndDate = end, historyVisibleCount = 5)
+        }
+        refreshDerivedStatsAndFilters()
+    }
+
+    fun setCustomRangeEndDate(date: LocalDate) {
+        _uiState.update {
+            val start = if (date.isBefore(it.customRangeStartDate)) date else it.customRangeStartDate
+            it.copy(customRangeStartDate = start, customRangeEndDate = date, historyVisibleCount = 5)
+        }
         refreshDerivedStatsAndFilters()
     }
 
     fun setHistoryTypeFilter(type: ExerciseType?) {
-        _uiState.update { it.copy(historyTypeFilter = type) }
+        _uiState.update { it.copy(historyTypeFilter = type, historyVisibleCount = 5) }
         refreshDerivedStatsAndFilters()
     }
 
+    fun loadMoreHistory() {
+        _uiState.update { it.copy(historyVisibleCount = (it.historyVisibleCount + 5).coerceAtMost(200)) }
+    }
+
+    fun resetHistoryVisibleCount() {
+        _uiState.update { it.copy(historyVisibleCount = 5) }
+    }
+
     fun updateProfile(profile: UserProfile) {
-        _uiState.update { it.copy(profile = profile) }
+        val normalized = profile.copy(
+            shareRecipientEmails = profile.shareRecipientEmails
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct(),
+        )
+        _uiState.update { it.copy(profile = normalized) }
+        persistProfile()
     }
 
     fun toggleBluetoothConnection() {
@@ -436,18 +772,234 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         persistSettings()
     }
 
-    fun setHomePinEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(settings = it.settings.copy(homePinEnabled = enabled)) }
-        persistSettings()
-    }
-
-    fun updateHomePinText(text: String) {
-        _uiState.update { it.copy(settings = it.settings.copy(homePinText = text.take(20))) }
+    fun setHistoryFieldVisible(field: HistoryDisplayField, visible: Boolean) {
+        _uiState.update { state ->
+            val next = state.settings.visibleHistoryFields.toMutableSet()
+            if (visible) {
+                next.add(field)
+            } else {
+                if (next.size == 1 && next.contains(field)) return@update state
+                next.remove(field)
+            }
+            state.copy(settings = state.settings.copy(visibleHistoryFields = next))
+        }
         persistSettings()
     }
 
     fun setShowTrackArea(enabled: Boolean) {
         _uiState.update { it.copy(settings = it.settings.copy(showTrackArea = enabled)) }
+        persistSettings()
+    }
+
+    fun setPanelRefreshIntervalSeconds(seconds: Int) {
+        _uiState.update {
+            it.copy(settings = it.settings.copy(panelRefreshIntervalSeconds = seconds.coerceIn(1, 30)))
+        }
+        persistSettings()
+        startInputs(forceRestartLocation = true)
+    }
+
+    fun setCompassAutoCalibrationEnabled(enabled: Boolean) {
+        _uiState.update {
+            it.copy(settings = it.settings.copy(compassAutoCalibrationEnabled = enabled))
+        }
+        persistSettings()
+        updateAzimuthDisplay()
+    }
+
+    fun setCompassCalibrationMode(enabled: Boolean) {
+        _uiState.update { it.copy(compassCalibrationMode = enabled) }
+    }
+
+    fun calibrateCompassSetCurrentAsNorth() {
+        val targetOffset = normalizeDegrees(-latestAzimuthRawDegrees)
+        _uiState.update {
+            it.copy(settings = it.settings.copy(compassCalibrationOffsetDegrees = targetOffset))
+        }
+        persistSettings()
+        updateAzimuthDisplay()
+    }
+
+    fun resetCompassCalibration() {
+        _uiState.update {
+            it.copy(settings = it.settings.copy(compassCalibrationOffsetDegrees = 0f))
+        }
+        persistSettings()
+        updateAzimuthDisplay()
+    }
+
+    fun toggleCompassBacktrackMode(enabled: Boolean) {
+        if (enabled) {
+            prepareBacktrackNodesForMode()
+            if (activeBacktrackNodes.size < 2) {
+                _uiState.update {
+                    it.copy(
+                        compassBacktrackMode = false,
+                        compassBacktrackTargetIndex = -1,
+                        activeBacktrackNodeCount = activeBacktrackNodes.size,
+                    )
+                }
+                return
+            }
+            _uiState.update {
+                it.copy(
+                    compassBacktrackMode = true,
+                    activeBacktrackNodeCount = activeBacktrackNodes.size,
+                )
+            }
+            setNearestBacktrackTarget()
+            updateBacktrackFromLocation(latestLocation)
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                compassBacktrackMode = false,
+                compassBacktrackTargetIndex = -1,
+                compassBacktrackBearingDegree = null,
+                compassBacktrackDistanceMeters = null,
+                compassBacktrackDeviationMeters = null,
+            )
+        }
+    }
+
+    fun backtrackToPreviousPoint() {
+        _uiState.update {
+            if (!it.compassBacktrackMode || activeBacktrackNodes.isEmpty()) return@update it
+            val nextIndex = (it.compassBacktrackTargetIndex - 1).coerceAtLeast(0)
+            it.copy(compassBacktrackTargetIndex = nextIndex)
+        }
+        updateBacktrackFromLocation(latestLocation)
+    }
+
+    fun backtrackToNextPoint() {
+        _uiState.update {
+            if (!it.compassBacktrackMode || activeBacktrackNodes.isEmpty()) return@update it
+            val maxIndex = (activeBacktrackNodes.size - 1).coerceAtLeast(0)
+            val nextIndex = (it.compassBacktrackTargetIndex + 1).coerceAtMost(maxIndex)
+            it.copy(compassBacktrackTargetIndex = nextIndex)
+        }
+        updateBacktrackFromLocation(latestLocation)
+    }
+
+    fun setBacktrackTargetIndex(index: Int) {
+        _uiState.update {
+            val maxIndex = (activeBacktrackNodes.size - 1).coerceAtLeast(0)
+            it.copy(compassBacktrackTargetIndex = index.coerceIn(0, maxIndex))
+        }
+        updateBacktrackFromLocation(latestLocation)
+    }
+
+    fun startBacktrackFromHistory(routeId: Long, direction: BacktrackDirection) {
+        selectBacktrackRoute(routeId)
+        setBacktrackDirection(direction)
+        toggleCompassBacktrackMode(true)
+    }
+
+    fun setBacktrackDirection(direction: BacktrackDirection) {
+        _uiState.update { it.copy(backtrackDirection = direction) }
+        if (_uiState.value.compassBacktrackMode) {
+            setNearestBacktrackTarget()
+            updateBacktrackFromLocation(latestLocation)
+        }
+    }
+
+    fun setStartWithPathRecordingOnWorkout(enabled: Boolean) {
+        _uiState.update { it.copy(startWithPathRecordingOnWorkout = enabled) }
+    }
+
+    fun refreshBacktrackRoutes() {
+        val routes = repository.loadBacktrackRoutes()
+        _uiState.update { state ->
+            val selected = when {
+                state.selectedBacktrackRouteId != null &&
+                    routes.any { it.id == state.selectedBacktrackRouteId } -> state.selectedBacktrackRouteId
+                else -> routes.firstOrNull()?.id
+            }
+            val activeName = routes.firstOrNull { it.id == selected }?.name ?: "实时轨迹"
+            state.copy(
+                backtrackRoutes = routes,
+                selectedBacktrackRouteId = selected,
+                activeBacktrackRouteName = activeName,
+            )
+        }
+        prepareBacktrackNodesForMode()
+    }
+
+    fun selectBacktrackRoute(routeId: Long?) {
+        _uiState.update { state ->
+            val selected = if (routeId == null || state.backtrackRoutes.any { it.id == routeId }) routeId else state.selectedBacktrackRouteId
+            val name = state.backtrackRoutes.firstOrNull { it.id == selected }?.name ?: "实时轨迹"
+            state.copy(
+                selectedBacktrackRouteId = selected,
+                activeBacktrackRouteName = name,
+            )
+        }
+        prepareBacktrackNodesForMode()
+        if (_uiState.value.compassBacktrackMode) {
+            setNearestBacktrackTarget()
+            updateBacktrackFromLocation(latestLocation)
+        }
+    }
+
+    fun saveCurrentBreadcrumbAsBacktrackRoute() {
+        if (breadcrumbTrail.size < 2 || _uiState.value.isBacktrackRoutePersisting) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isBacktrackRoutePersisting = true) }
+            val name = "回溯_手动_${LocalDateTime.now().format(routeNameFormatter)}"
+            val routeId = repository.saveBacktrackRoute(
+                routeName = name,
+                sourceWorkoutId = null,
+                nodes = breadcrumbTrail.toList(),
+            )
+            refreshBacktrackRoutes()
+            _uiState.update { it.copy(isBacktrackRoutePersisting = false) }
+            if (routeId > 0) {
+                selectBacktrackRoute(routeId)
+            }
+            prepareBacktrackNodesForMode()
+        }
+    }
+
+    fun moveBottomNavItem(tabKey: String, direction: Int) {
+        _uiState.update { state ->
+            val order = state.settings.bottomNavOrder.toMutableList()
+            val index = order.indexOf(tabKey)
+            if (index == -1) return@update state
+            val target = (index + direction).coerceIn(0, order.lastIndex)
+            if (target == index) return@update state
+            val item = order.removeAt(index)
+            order.add(target, item)
+            state.copy(settings = state.settings.copy(bottomNavOrder = order))
+        }
+        persistSettings()
+    }
+
+    fun resetBottomNavOrder() {
+        _uiState.update {
+            it.copy(settings = it.settings.copy(bottomNavOrder = listOf("PANEL", "HOME", "RECORD", "PROFILE")))
+        }
+        persistSettings()
+    }
+
+    fun moveMyPageItem(sectionKey: String, direction: Int) {
+        _uiState.update { state ->
+            val order = state.settings.myPageOrder.toMutableList()
+            val index = order.indexOf(sectionKey)
+            if (index == -1) return@update state
+            val target = (index + direction).coerceIn(0, order.lastIndex)
+            if (target == index) return@update state
+            val item = order.removeAt(index)
+            order.add(target, item)
+            state.copy(settings = state.settings.copy(myPageOrder = order))
+        }
+        persistSettings()
+    }
+
+    fun resetMyPageOrder() {
+        _uiState.update {
+            it.copy(settings = it.settings.copy(myPageOrder = listOf("device", "history", "settings")))
+        }
         persistSettings()
     }
 
@@ -457,13 +1009,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refreshDerivedStatsAndFilters()
     }
 
-    fun setDefaultPrivacyMode(mode: PrivacyMode) {
-        _uiState.update { it.copy(settings = it.settings.copy(defaultPrivacyMode = mode)) }
-        persistSettings()
-    }
-
     fun updateMapApiKey(key: String) {
         updateServiceSettings { it.copy(mapApiKey = key, mapEnabled = it.mapEnabled && key.isNotBlank()) }
+    }
+
+    fun setMapUseSystemService(enabled: Boolean) {
+        updateServiceSettings { it.copy(mapUseSystemService = enabled) }
     }
 
     fun setMapEnabled(enabled: Boolean) {
@@ -490,6 +1041,108 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         updateServiceSettings {
             it.copy(shareEnabled = enabled && it.shareApiKey.isNotBlank())
         }
+    }
+
+    fun updateSmtpHost(value: String) {
+        updateServiceSettings { it.copy(smtpHost = value.trim()) }
+    }
+
+    fun updateSmtpPort(value: Int) {
+        updateServiceSettings { it.copy(smtpPort = value.coerceIn(1, 65535)) }
+    }
+
+    fun updateSmtpUsername(value: String) {
+        updateServiceSettings { it.copy(smtpUsername = value.trim()) }
+    }
+
+    fun updateSmtpPassword(value: String) {
+        updateServiceSettings { it.copy(smtpPassword = value) }
+    }
+
+    fun updateSmtpFromEmail(value: String) {
+        updateServiceSettings { it.copy(smtpFromEmail = value.trim()) }
+    }
+
+    fun setSmtpUseTls(enabled: Boolean) {
+        updateServiceSettings { it.copy(smtpUseTls = enabled) }
+    }
+
+    fun setSmtpEnabled(enabled: Boolean) {
+        updateServiceSettings { it.copy(smtpEnabled = enabled && it.smtpConfigured) }
+    }
+
+    fun toggleOnlineSharing(enabled: Boolean) {
+        _uiState.update {
+            it.copy(
+                onlineSharingEnabled = enabled,
+                shareEmailStatus = if (!enabled) "在线轨迹共享已关闭" else it.shareEmailStatus,
+            )
+        }
+        if (enabled) {
+            sendOnlineShareEmail()
+        }
+    }
+
+    private fun sendOnlineShareEmail() {
+        val state = _uiState.value
+        val smtp = state.settings.serviceIntegration
+        val recipients = state.profile.shareRecipientEmails
+            .map { it.trim() }
+            .filter { it.isNotBlank() && Patterns.EMAIL_ADDRESS.matcher(it).matches() }
+            .distinct()
+
+        if (!smtp.smtpActive) {
+            _uiState.update { it.copy(shareEmailStatus = "SMTP 未配置完成，无法发送共享邮件") }
+            return
+        }
+        if (recipients.isEmpty()) {
+            _uiState.update { it.copy(shareEmailStatus = "未配置有效共享邮箱，无法发送") }
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val lat = state.currentLatitude
+        val lon = state.currentLongitude
+        val link = buildLiveShareLink(now, lat, lon)
+        val subject = "AppGo 在线轨迹共享 - ${state.selectedType.label}"
+        val body = buildString {
+            appendLine("你收到一条来自 AppGo 的在线轨迹共享。")
+            appendLine()
+            appendLine("运动类型: ${state.selectedType.label}")
+            appendLine("状态: ${state.recordingStatus.name}")
+            appendLine("里程: ${"%.2f".format(state.distanceMeters / 1000.0)} km")
+            appendLine("用时: ${state.elapsedSeconds} 秒")
+            appendLine("位置: ${lat?.let { "%.6f".format(it) } ?: "--"}, ${lon?.let { "%.6f".format(it) } ?: "--"}")
+            appendLine("共享链接: $link")
+        }
+
+        _uiState.update { it.copy(shareEmailStatus = "正在发送共享邮件...") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = SmtpEmailSender.send(
+                host = smtp.smtpHost,
+                port = smtp.smtpPort,
+                useTls = smtp.smtpUseTls,
+                username = smtp.smtpUsername,
+                password = smtp.smtpPassword,
+                fromEmail = smtp.smtpFromEmail,
+                toEmails = recipients,
+                subject = subject,
+                body = body,
+            )
+            _uiState.update {
+                if (result.isSuccess) {
+                    it.copy(shareEmailStatus = "共享邮件已发送（${recipients.size}人）")
+                } else {
+                    it.copy(shareEmailStatus = "共享邮件发送失败: ${result.exceptionOrNull()?.message ?: "未知错误"}")
+                }
+            }
+        }
+    }
+
+    private fun buildLiveShareLink(now: Long, latitude: Double?, longitude: Double?): String {
+        val latText = latitude?.let { "%.6f".format(it) } ?: "0"
+        val lonText = longitude?.let { "%.6f".format(it) } ?: "0"
+        return "https://appgo.local/live?ts=$now&lat=$latText&lon=$lonText"
     }
 
     fun setLocalBackupEnabled(enabled: Boolean) {
@@ -714,13 +1367,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        stopTickerAndInputs()
+        stopTickerOnly()
+        detailReplayJob?.cancel()
+        stopInputs()
     }
 
     private fun refreshFromDatabase() {
         val history = repository.loadWorkoutSummaries()
-        val defaultId = history.firstOrNull()?.record?.id
-        val defaultTrack = defaultId?.let(repository::loadTrackPoints) ?: emptyList()
+        val defaultId: Long? = null
+        val defaultTrack = emptyList<TrackPoint>()
+        val replayPoints = emptyList<DetailReplayPoint>()
         val analysis = analyzeWorkoutTrack(defaultTrack)
         _uiState.update {
             it.copy(
@@ -728,38 +1384,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 lastWorkout = history.firstOrNull(),
                 selectedWorkoutId = defaultId,
                 selectedWorkoutTrack = defaultTrack,
-                selectedWorkoutSummary = history.firstOrNull(),
+                selectedWorkoutReplayPoints = replayPoints,
+                selectedWorkoutSummary = null,
                 selectedWorkoutSegmentPace = analysis.segmentPace,
                 selectedWorkoutHeartRateZones = analysis.heartRateZones,
                 selectedWorkoutPaceSeries = analysis.paceSeries,
                 selectedWorkoutHeartRateSeries = analysis.heartRateSeries,
+                detailReplayPanelVisible = false,
+                detailReplayAnchorIndex = -1,
+                detailReplayCurrentIndex = -1,
+                detailReplayDirection = DetailReplayDirection.FORWARD,
+                detailReplayPlaying = false,
             )
         }
         refreshDerivedStatsAndFilters()
+        refreshBacktrackRoutes()
     }
 
     private fun refreshDerivedStatsAndFilters() {
         val state = _uiState.value
-        val history = state.history
-
-        val weekStart = state.weekAnchorDate.minusDays(state.weekAnchorDate.dayOfWeek.value.toLong() - 1)
-        val weekEnd = weekStart.plusDays(6)
-        val monthStart = state.monthAnchor.atDay(1)
-        val monthEnd = state.monthAnchor.atEndOfMonth()
-        val yearStart = LocalDate.of(state.yearAnchor, 1, 1)
-        val yearEnd = LocalDate.of(state.yearAnchor, 12, 31)
+        val derived = HistoryDomain.derive(
+            history = state.history,
+            historyFilterDate = state.historyFilterDate,
+            weekAnchorDate = state.weekAnchorDate,
+            monthAnchor = state.monthAnchor,
+            yearAnchor = state.yearAnchor,
+            customRangeStartDate = state.customRangeStartDate,
+            customRangeEndDate = state.customRangeEndDate,
+            historyTypeFilter = state.historyTypeFilter,
+        )
 
         _uiState.update {
-            val weekly = statsInRange(history, weekStart, weekEnd)
             it.copy(
-                weeklyStats = weekly,
-                monthlyStats = statsInRange(history, monthStart, monthEnd),
-                yearlyStats = statsInRange(history, yearStart, yearEnd),
-                filteredHistory = history.filter { summary ->
-                    toLocalDate(summary.record.startTimeMillis) == it.historyFilterDate &&
-                        (it.historyTypeFilter == null || summary.record.type == it.historyTypeFilter)
-                },
-                weeklyDistanceMeters = weekly.totalDistanceMeters,
+                dailyStats = derived.dailyStats,
+                weeklyStats = derived.weeklyStats,
+                monthlyStats = derived.monthlyStats,
+                yearlyStats = derived.yearlyStats,
+                customRangeStats = derived.customRangeStats,
+                filteredHistory = derived.filteredHistory,
+                weeklyDistanceMeters = derived.weeklyStats.totalDistanceMeters,
             )
         }
     }
@@ -784,6 +1447,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 mapEnabled = changed.mapEnabled && changed.mapApiKey.isNotBlank(),
                 weatherEnabled = changed.weatherEnabled && changed.weatherApiKey.isNotBlank(),
                 shareEnabled = changed.shareEnabled && changed.shareApiKey.isNotBlank(),
+                smtpEnabled = changed.smtpEnabled && changed.smtpConfigured,
             )
             state.copy(settings = state.settings.copy(serviceIntegration = updated))
         }
@@ -798,23 +1462,45 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ?.toSet()
             ?.takeIf { it.isNotEmpty() }
             ?: AppSettings().visibleMetrics
+        val historyFieldsRaw = prefs.getString("visible_history_fields", null)
+        val historyFields = historyFieldsRaw
+            ?.split(",")
+            ?.mapNotNull { name -> HistoryDisplayField.entries.find { it.name == name } }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
+            ?: AppSettings().visibleHistoryFields
 
         val mapApiKey = prefs.getString("map_api_key", "") ?: ""
+        val mapUseSystemService = prefs.getBoolean("map_use_system_service", true)
         val mapEnabled = prefs.getBoolean("map_enabled", false) && mapApiKey.isNotBlank()
         val weatherApiKey = prefs.getString("weather_api_key", "") ?: ""
         val weatherEnabled = prefs.getBoolean("weather_enabled", false) && weatherApiKey.isNotBlank()
         val shareApiKey = prefs.getString("share_api_key", "") ?: ""
         val shareEnabled = prefs.getBoolean("share_enabled", false) && shareApiKey.isNotBlank()
-        val homePinEnabled = prefs.getBoolean("home_pin_enabled", true)
-        val homePinText = prefs.getString("home_pin_text", "GO!") ?: "GO!"
+        val smtpHost = prefs.getString("smtp_host", "") ?: ""
+        val smtpPort = prefs.getInt("smtp_port", 587).coerceIn(1, 65535)
+        val smtpUsername = prefs.getString("smtp_username", "") ?: ""
+        val smtpPassword = prefs.getString("smtp_password", "") ?: ""
+        val smtpFromEmail = prefs.getString("smtp_from_email", "") ?: ""
+        val smtpUseTls = prefs.getBoolean("smtp_use_tls", true)
+        val smtpEnabled = prefs.getBoolean("smtp_enabled", false)
         val showTrackArea = prefs.getBoolean("show_track_area", true)
+        val panelRefreshIntervalSeconds = prefs.getInt("panel_refresh_interval_sec", 2).coerceIn(1, 30)
+        val compassAutoCalibrationEnabled = prefs.getBoolean("compass_auto_calibration_enabled", true)
+        val bottomNavOrder = normalizeBottomNavOrder(
+            prefs.getString("bottom_nav_order", null)
+                ?.split(",")
+                ?.map { it.trim().uppercase(Locale.ROOT) }
+                ?: emptyList()
+        )
+        val myPageOrder = normalizeMyPageOrder(
+            prefs.getString("my_page_order", null)
+                ?.split(",")
+                ?.map { it.trim() }
+                ?: emptyList()
+        )
         val weeklyGoalKm = prefs.getInt("weekly_goal_km", 30).coerceIn(1, 500)
-        val defaultPrivacyMode = runCatching {
-            PrivacyMode.valueOf(
-                prefs.getString("default_privacy_mode", PrivacyMode.FRIENDS.name)
-                    ?: PrivacyMode.FRIENDS.name
-            )
-        }.getOrElse { PrivacyMode.FRIENDS }
+        val compassCalibrationOffsetDegrees = prefs.getFloat("compass_calibration_offset_deg", 0f)
 
         val localBackupEnabled = prefs.getBoolean("backup_local_enabled", true)
         val cloudProvider = runCatching {
@@ -856,18 +1542,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 settings = AppSettings(
                     visibleMetrics = metrics,
-                    homePinEnabled = homePinEnabled,
-                    homePinText = homePinText,
                     showTrackArea = showTrackArea,
+                    panelRefreshIntervalSeconds = panelRefreshIntervalSeconds,
+                    compassAutoCalibrationEnabled = compassAutoCalibrationEnabled,
                     weeklyGoalKm = weeklyGoalKm,
-                    defaultPrivacyMode = defaultPrivacyMode,
+                    compassCalibrationOffsetDegrees = compassCalibrationOffsetDegrees,
+                    bottomNavOrder = bottomNavOrder,
+                    myPageOrder = myPageOrder,
+                    visibleHistoryFields = historyFields,
                     serviceIntegration = ServiceIntegrationConfig(
+                        mapUseSystemService = mapUseSystemService,
                         mapApiKey = mapApiKey,
                         mapEnabled = mapEnabled,
                         weatherApiKey = weatherApiKey,
                         weatherEnabled = weatherEnabled,
                         shareApiKey = shareApiKey,
                         shareEnabled = shareEnabled,
+                        smtpHost = smtpHost,
+                        smtpPort = smtpPort,
+                        smtpUsername = smtpUsername,
+                        smtpPassword = smtpPassword,
+                        smtpFromEmail = smtpFromEmail,
+                        smtpUseTls = smtpUseTls,
+                        smtpEnabled = smtpEnabled,
                     ),
                     backupConfig = BackupConfig(
                         localBackupEnabled = localBackupEnabled,
@@ -882,21 +1579,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun loadProfile() {
+        val recipients = prefs.getString("profile_share_recipients", null)
+            ?.split(";")
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.distinct()
+            ?: emptyList()
+        _uiState.update { it.copy(profile = it.profile.copy(shareRecipientEmails = recipients)) }
+    }
+
     private fun persistSettings() {
         val settings = _uiState.value.settings
         prefs.edit()
             .putString("visible_metrics", settings.visibleMetrics.joinToString(",") { it.name })
-            .putBoolean("home_pin_enabled", settings.homePinEnabled)
-            .putString("home_pin_text", settings.homePinText)
+            .putString("visible_history_fields", settings.visibleHistoryFields.joinToString(",") { it.name })
             .putBoolean("show_track_area", settings.showTrackArea)
+            .putInt("panel_refresh_interval_sec", settings.panelRefreshIntervalSeconds)
+            .putBoolean("compass_auto_calibration_enabled", settings.compassAutoCalibrationEnabled)
             .putInt("weekly_goal_km", settings.weeklyGoalKm)
-            .putString("default_privacy_mode", settings.defaultPrivacyMode.name)
+            .putFloat("compass_calibration_offset_deg", settings.compassCalibrationOffsetDegrees)
+            .putString("bottom_nav_order", normalizeBottomNavOrder(settings.bottomNavOrder).joinToString(","))
+            .putString("my_page_order", normalizeMyPageOrder(settings.myPageOrder).joinToString(","))
+            .putBoolean("map_use_system_service", settings.serviceIntegration.mapUseSystemService)
             .putString("map_api_key", settings.serviceIntegration.mapApiKey)
             .putBoolean("map_enabled", settings.serviceIntegration.mapEnabled)
             .putString("weather_api_key", settings.serviceIntegration.weatherApiKey)
             .putBoolean("weather_enabled", settings.serviceIntegration.weatherEnabled)
             .putString("share_api_key", settings.serviceIntegration.shareApiKey)
             .putBoolean("share_enabled", settings.serviceIntegration.shareEnabled)
+            .putString("smtp_host", settings.serviceIntegration.smtpHost)
+            .putInt("smtp_port", settings.serviceIntegration.smtpPort)
+            .putString("smtp_username", settings.serviceIntegration.smtpUsername)
+            .putString("smtp_password", settings.serviceIntegration.smtpPassword)
+            .putString("smtp_from_email", settings.serviceIntegration.smtpFromEmail)
+            .putBoolean("smtp_use_tls", settings.serviceIntegration.smtpUseTls)
+            .putBoolean("smtp_enabled", settings.serviceIntegration.smtpEnabled)
             .putBoolean("backup_local_enabled", settings.backupConfig.localBackupEnabled)
             .putString("backup_cloud_provider", settings.backupConfig.cloudConfig.provider.name)
             .putBoolean("backup_cloud_enabled", settings.backupConfig.cloudConfig.enabled)
@@ -915,6 +1633,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .apply()
     }
 
+    private fun persistProfile() {
+        val profile = _uiState.value.profile
+        prefs.edit()
+            .putString("profile_share_recipients", profile.shareRecipientEmails.joinToString(";"))
+            .apply()
+    }
+
     private fun pruneLocalBackups(folder: File, retainDays: Int) {
         val threshold = System.currentTimeMillis() - retainDays * 24L * 3600L * 1000L
         folder.listFiles()
@@ -929,26 +1654,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return folder
     }
 
-    private fun startInputs() {
-        if (gyroscope != null) {
-            sensorManager.registerListener(gyroListener, gyroscope, SensorManager.SENSOR_DELAY_UI)
+    private fun startInputs(forceRestartLocation: Boolean = false) {
+        if (!monitoringInputs) {
+            if (gyroscope != null) {
+                sensorManager.registerListener(gyroListener, gyroscope, SensorManager.SENSOR_DELAY_UI)
+            }
+            if (rotationVectorSensor != null) {
+                sensorManager.registerListener(rotationVectorListener, rotationVectorSensor, SensorManager.SENSOR_DELAY_UI)
+            }
+            if (magneticSensor != null) {
+                sensorManager.registerListener(magneticListener, magneticSensor, SensorManager.SENSOR_DELAY_UI)
+            }
+            if (pressureSensor != null) {
+                sensorManager.registerListener(pressureListener, pressureSensor, SensorManager.SENSOR_DELAY_UI)
+            }
+            monitoringInputs = true
         }
-        if (rotationVectorSensor != null) {
-            sensorManager.registerListener(rotationVectorListener, rotationVectorSensor, SensorManager.SENSOR_DELAY_UI)
-        }
-        if (magneticSensor != null) {
-            sensorManager.registerListener(magneticListener, magneticSensor, SensorManager.SENSOR_DELAY_UI)
-        }
-        if (pressureSensor != null) {
-            sensorManager.registerListener(pressureListener, pressureSensor, SensorManager.SENSOR_DELAY_UI)
-        }
-        if (!hasLocationPermission()) return
 
+        if (!hasLocationPermission()) return
+        if (forceRestartLocation) {
+            runCatching { locationManager.removeUpdates(locationListener) }
+        }
+
+        val intervalMillis = (_uiState.value.settings.panelRefreshIntervalSeconds * 1000L).coerceAtLeast(1000L)
         try {
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    1000L,
+                    intervalMillis,
                     0f,
                     locationListener,
                     Looper.getMainLooper(),
@@ -957,7 +1690,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.NETWORK_PROVIDER,
-                    1500L,
+                    intervalMillis,
                     0f,
                     locationListener,
                     Looper.getMainLooper(),
@@ -968,13 +1701,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun stopTickerAndInputs() {
+    private fun stopTickerOnly() {
         tickerJob?.cancel()
+    }
+
+    private fun stopInputs() {
         sensorManager.unregisterListener(gyroListener)
         sensorManager.unregisterListener(rotationVectorListener)
         sensorManager.unregisterListener(magneticListener)
         sensorManager.unregisterListener(pressureListener)
         runCatching { locationManager.removeUpdates(locationListener) }
+        monitoringInputs = false
     }
 
     private fun startTicker() {
@@ -989,6 +1726,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 val now = System.currentTimeMillis()
+                if (now - lastWeatherUpdateMillis >= 10_000) {
+                    refreshWeatherSnapshot(latestLocation, force = true)
+                }
                 val location = latestLocation
                 val speedFromLocation = if (location != null && location.hasSpeed()) location.speed.toDouble() else 0.0
                 val speedFromGyro = max(0.0, (latestGyroMagnitude - 0.06f) * 4.2).toDouble()
@@ -1075,6 +1815,60 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+        }
+    }
+
+    private fun startDetailReplayLoop() {
+        detailReplayJob?.cancel()
+        detailReplayJob = viewModelScope.launch {
+            while (true) {
+                val state = _uiState.value
+                val points = state.selectedWorkoutReplayPoints
+                if (!state.detailReplayPlaying || !state.detailReplayPanelVisible || points.size < 2) break
+                val current = state.detailReplayCurrentIndex
+                if (current !in points.indices) break
+
+                val next = when (state.detailReplayDirection) {
+                    DetailReplayDirection.FORWARD -> {
+                        if (current >= points.lastIndex) {
+                            _uiState.update { it.copy(detailReplayPlaying = false) }
+                            notifyDetailReplay("已到达终点")
+                            break
+                        }
+                        ReplayDomain.nextIndex(
+                            current = current,
+                            lastIndex = points.lastIndex,
+                            direction = state.detailReplayDirection,
+                            isLongTrack = points.size > 20_000,
+                        )
+                    }
+                    DetailReplayDirection.REVERSE -> {
+                        if (current <= 0) {
+                            _uiState.update { it.copy(detailReplayPlaying = false) }
+                            notifyDetailReplay("已回到起点")
+                            break
+                        }
+                        ReplayDomain.nextIndex(
+                            current = current,
+                            lastIndex = points.lastIndex,
+                            direction = state.detailReplayDirection,
+                            isLongTrack = points.size > 20_000,
+                        )
+                    }
+                }
+                _uiState.update { it.copy(detailReplayCurrentIndex = next) }
+                delay(state.detailReplaySpeed.frameDelayMillis)
+            }
+        }
+    }
+
+    private fun notifyDetailReplay(message: String) {
+        _uiState.update {
+            it.copy(
+                detailReplayNotice = message,
+                detailReplayNoticeVersion = it.detailReplayNoticeVersion + 1,
+                detailReplayPlaying = false,
+            )
         }
     }
 
@@ -1197,6 +1991,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return r * c
     }
 
+    private fun haversineMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
+        ReplayDomain.haversineMeters(lat1, lon1, lat2, lon2)
+
     private fun workStatus(sensorAvailable: Boolean, nowMillis: Long, lastMillis: Long): SensorWorkStatus {
         if (!sensorAvailable) return SensorWorkStatus.BAD
         if (lastMillis <= 0) return SensorWorkStatus.WARN
@@ -1208,6 +2005,304 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun refreshWeatherSnapshot(location: Location? = latestLocation, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastWeatherUpdateMillis < 10_000) return
+        lastWeatherUpdateMillis = now
+
+        val state = _uiState.value
+        val humidity = (58 + Random.nextInt(-8, 12)).coerceIn(20, 98)
+        val weather = WeatherDomain.buildLocationDrivenWeather(
+            now = now,
+            latitude = location?.latitude ?: state.currentLatitude,
+            longitude = location?.longitude ?: state.currentLongitude,
+            altitude = state.currentAltitude,
+            currentSpeedMps = state.currentSpeedMps,
+            pressureHpa = latestPressureHpa,
+            windDirectionDegree = location?.bearing?.roundToInt()?.let { b -> ((b % 360) + 360) % 360 },
+            humidity = humidity,
+        )
+
+        _uiState.update {
+            it.copy(
+                weather = weather,
+                weatherForecast3d = WeatherDomain.buildThreeDayForecast(weather, now),
+            )
+        }
+    }
+
+    private fun updateAzimuthDisplay() {
+        val location = latestLocation
+        val declination = if (location != null) {
+            GeomagneticField(
+                location.latitude.toFloat(),
+                location.longitude.toFloat(),
+                location.altitude.toFloat(),
+                System.currentTimeMillis(),
+            ).declination
+        } else {
+            0f
+        }
+        val state = _uiState.value
+        val baseAzimuth = latestAzimuthRawDegrees
+        val offset = _uiState.value.settings.compassCalibrationOffsetDegrees
+        val target = normalizeDegrees(baseAzimuth + declination + offset)
+        latestAzimuthDegrees = if (state.settings.compassAutoCalibrationEnabled) {
+            val current = latestAzimuthDegrees
+            if (current == 0f) {
+                target
+            } else {
+                normalizeDegrees(current + signedAngleDelta(current, target) * 0.25f)
+            }
+        } else {
+            target
+        }
+        _uiState.update { it.copy(azimuthDegree = latestAzimuthDegrees) }
+    }
+
+    private fun normalizeDegrees(degrees: Float): Float {
+        var v = degrees % 360f
+        if (v < 0f) v += 360f
+        return v
+    }
+
+    private fun signedAngleDelta(from: Float, to: Float): Float {
+        var delta = (to - from + 540f) % 360f - 180f
+        if (!delta.isFinite()) delta = 0f
+        return delta
+    }
+
+    private fun normalizeBottomNavOrder(raw: List<String>): List<String> {
+        val default = listOf("PANEL", "HOME", "RECORD", "PROFILE")
+        if (raw.isEmpty()) return default
+        val filtered = raw.filter { it in default }.distinct().toMutableList()
+        default.forEach { if (!filtered.contains(it)) filtered.add(it) }
+        return filtered.take(default.size)
+    }
+
+    private fun normalizeMyPageOrder(raw: List<String>): List<String> {
+        val default = listOf("device", "history", "settings")
+        if (raw.isEmpty()) return default
+        val filtered = raw.map { it.lowercase(Locale.ROOT) }.filter { it in default }.distinct().toMutableList()
+        default.forEach { if (!filtered.contains(it)) filtered.add(it) }
+        return filtered.take(default.size)
+    }
+
+    private fun appendBreadcrumb(location: Location) {
+        val now = System.currentTimeMillis()
+        val last = breadcrumbTrail.lastOrNull()
+        var changed = false
+        if (last == null) {
+            breadcrumbTrail += BreadcrumbPoint(now, location.latitude, location.longitude)
+            changed = true
+        } else {
+            val distance = distanceMeters(last.latitude, last.longitude, location.latitude, location.longitude)
+            val timeDelta = now - last.timestampMillis
+            if (distance >= 8.0 || timeDelta >= 15_000) {
+                breadcrumbTrail += BreadcrumbPoint(now, location.latitude, location.longitude)
+                if (breadcrumbTrail.size > 400) {
+                    breadcrumbTrail.removeAt(0)
+                }
+                changed = true
+            }
+        }
+        if (changed && _uiState.value.selectedBacktrackRouteId == null) {
+            prepareBacktrackNodesForMode()
+        }
+    }
+
+    private fun maybeResolveAddress(location: Location) {
+        val now = System.currentTimeMillis()
+        if (now - lastAddressResolveMillis < 20_000) return
+        lastAddressResolveMillis = now
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val text = runCatching { resolveAddressText(location) }.getOrDefault("")
+
+            _uiState.update { state ->
+                if (text.isNotBlank()) {
+                    state.copy(currentAddressText = text)
+                } else {
+                    state.copy(currentAddressText = "经纬度 ${"%.5f".format(location.latitude)}, ${"%.5f".format(location.longitude)}")
+                }
+            }
+        }
+    }
+
+    private suspend fun resolveAddressText(location: Location): String {
+        val geocoder = Geocoder(getApplication(), Locale.getDefault())
+        val first = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            suspendCancellableCoroutine<Address?> { cont ->
+                geocoder.getFromLocation(
+                    location.latitude,
+                    location.longitude,
+                    1,
+                    object : Geocoder.GeocodeListener {
+                        override fun onGeocode(addresses: MutableList<Address>) {
+                            if (cont.isActive) cont.resume(addresses.firstOrNull())
+                        }
+
+                        override fun onError(errorMessage: String?) {
+                            if (cont.isActive) cont.resume(null)
+                        }
+                    },
+                )
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            geocoder.getFromLocation(location.latitude, location.longitude, 1)?.firstOrNull()
+        }
+
+        return if (first == null) {
+            ""
+        } else {
+            listOfNotNull(
+                first.countryName,
+                first.adminArea,
+                first.subAdminArea,
+                first.locality,
+                first.subLocality,
+                first.thoroughfare,
+                first.featureName,
+            ).joinToString(" ").trim()
+        }
+    }
+
+    private fun updateBacktrackFromLocation(location: Location?) {
+        val state = _uiState.value
+        if (!state.compassBacktrackMode || activeBacktrackNodes.isEmpty() || location == null) {
+            _uiState.update {
+                it.copy(
+                    compassBacktrackBearingDegree = null,
+                    compassBacktrackDistanceMeters = null,
+                    compassBacktrackDeviationMeters = null,
+                    compassBacktrackPointerDeviationDegree = null,
+                )
+            }
+            return
+        }
+
+        val targetIndex = state.compassBacktrackTargetIndex.coerceIn(0, activeBacktrackNodes.lastIndex)
+        val target = activeBacktrackNodes[targetIndex]
+        val targetLocation = Location("backtrack-target").apply {
+            latitude = target.latitude
+            longitude = target.longitude
+        }
+        val bearing = location.bearingTo(targetLocation)
+        val distance = location.distanceTo(targetLocation).toDouble()
+        val step = if (state.backtrackDirection == BacktrackDirection.REVERSE) -1 else 1
+        val nextIndex = targetIndex + step
+        val deviation = if (nextIndex in activeBacktrackNodes.indices) {
+            distancePointToSegmentMeters(
+                latitude = location.latitude,
+                longitude = location.longitude,
+                a = activeBacktrackNodes[targetIndex],
+                b = activeBacktrackNodes[nextIndex],
+            )
+        } else {
+            distance
+        }
+        val deviationStatus = when {
+            deviation <= 15.0 -> SensorWorkStatus.GOOD
+            deviation <= 40.0 -> SensorWorkStatus.WARN
+            else -> SensorWorkStatus.BAD
+        }
+        val pointerDeviation = kotlin.math.abs(signedAngleDelta(latestAzimuthDegrees, normalizeDegrees(bearing)))
+        val pointerStatus = when {
+            pointerDeviation <= 15f -> SensorWorkStatus.GOOD
+            pointerDeviation <= 45f -> SensorWorkStatus.WARN
+            else -> SensorWorkStatus.BAD
+        }
+        val progressedIndex = if (distance <= 12.0 && nextIndex in activeBacktrackNodes.indices) nextIndex else targetIndex
+
+        _uiState.update {
+            it.copy(
+                compassBacktrackTargetIndex = progressedIndex,
+                compassBacktrackBearingDegree = normalizeDegrees(bearing),
+                compassBacktrackDistanceMeters = distance,
+                compassBacktrackDeviationMeters = deviation,
+                compassBacktrackDeviationStatus = deviationStatus,
+                compassBacktrackPointerDeviationDegree = pointerDeviation,
+                compassBacktrackPointerDeviationStatus = pointerStatus,
+            )
+        }
+    }
+
+    private fun prepareBacktrackNodesForMode() {
+        val selectedRouteId = _uiState.value.selectedBacktrackRouteId
+        val nodes = if (selectedRouteId != null) {
+            repository.loadBacktrackNodes(selectedRouteId)
+        } else {
+            breadcrumbTrail.toList()
+        }
+        activeBacktrackNodes.clear()
+        activeBacktrackNodes.addAll(nodes)
+        _uiState.update { state ->
+            val routeName = state.backtrackRoutes.firstOrNull { it.id == state.selectedBacktrackRouteId }?.name ?: "实时轨迹"
+            val clampedIndex = if (activeBacktrackNodes.isEmpty()) -1 else state.compassBacktrackTargetIndex.coerceIn(0, activeBacktrackNodes.lastIndex)
+            state.copy(
+                activeBacktrackNodeCount = activeBacktrackNodes.size,
+                activeBacktrackRouteName = routeName,
+                compassBacktrackTargetIndex = clampedIndex,
+                activeBacktrackNodes = activeBacktrackNodes.toList(),
+            )
+        }
+    }
+
+    private fun setNearestBacktrackTarget() {
+        val location = latestLocation
+        val state = _uiState.value
+        if (activeBacktrackNodes.isEmpty()) {
+            _uiState.update { it.copy(compassBacktrackTargetIndex = -1) }
+            return
+        }
+        val fallback = if (state.backtrackDirection == BacktrackDirection.REVERSE) {
+            (activeBacktrackNodes.size - 1).coerceAtLeast(0)
+        } else {
+            0
+        }
+        if (location == null) {
+            _uiState.update { it.copy(compassBacktrackTargetIndex = fallback) }
+            return
+        }
+        val nearestIndex = activeBacktrackNodes.indices.minByOrNull { idx ->
+            val node = activeBacktrackNodes[idx]
+            distanceMeters(location.latitude, location.longitude, node.latitude, node.longitude)
+        } ?: fallback
+        _uiState.update { it.copy(compassBacktrackTargetIndex = nearestIndex) }
+    }
+
+    private fun distancePointToSegmentMeters(
+        latitude: Double,
+        longitude: Double,
+        a: BreadcrumbPoint,
+        b: BreadcrumbPoint,
+    ): Double {
+        val meanLat = Math.toRadians((a.latitude + b.latitude + latitude) / 3.0)
+        val scaleX = 111320.0 * cos(meanLat)
+        val scaleY = 110540.0
+        val px = longitude * scaleX
+        val py = latitude * scaleY
+        val ax = a.longitude * scaleX
+        val ay = a.latitude * scaleY
+        val bx = b.longitude * scaleX
+        val by = b.latitude * scaleY
+
+        val abx = bx - ax
+        val aby = by - ay
+        val ab2 = abx * abx + aby * aby
+        if (ab2 <= 1e-6) {
+            return sqrt((px - ax).pow(2) + (py - ay).pow(2))
+        }
+        val apx = px - ax
+        val apy = py - ay
+        val t = (apx * abx + apy * aby) / ab2
+        val clampedT = t.coerceIn(0.0, 1.0)
+        val closestX = ax + abx * clampedT
+        val closestY = ay + aby * clampedT
+        return sqrt((px - closestX).pow(2) + (py - closestY).pow(2))
+    }
+
     private fun hasLocationPermission(): Boolean {
         val context = getApplication<Application>()
         val fine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -1215,22 +2310,4 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return fine || coarse
     }
 
-    private fun toLocalDate(millis: Long): LocalDate =
-        Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
-
-    private fun statsInRange(history: List<WorkoutSummary>, start: LocalDate, end: LocalDate): StatsSummary {
-        val filtered = history.filter {
-            val d = toLocalDate(it.record.startTimeMillis)
-            !d.isBefore(start) && !d.isAfter(end)
-        }
-        val distance = filtered.sumOf { it.record.totalDistanceMeters }
-        val durationSeconds = filtered.sumOf { it.record.duration.seconds }
-        val elevation = filtered.sumOf { it.record.totalElevationGainMeters }
-        return StatsSummary(
-            totalDistanceMeters = distance,
-            totalDurationSeconds = durationSeconds,
-            totalElevationGainMeters = elevation,
-            estimatedCalories = ((distance / 1000.0) * 55).toInt(),
-        )
-    }
 }

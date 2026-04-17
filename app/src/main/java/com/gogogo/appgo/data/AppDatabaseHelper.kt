@@ -56,17 +56,65 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(
             )
             """.trimIndent()
         )
+
+        db.execSQL(
+            """
+            CREATE TABLE backtrack_routes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                route_name TEXT NOT NULL,
+                created_at_millis INTEGER NOT NULL,
+                source_workout_id INTEGER,
+                FOREIGN KEY(source_workout_id) REFERENCES workout_records(id) ON DELETE SET NULL
+            )
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            CREATE TABLE backtrack_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                route_id INTEGER NOT NULL,
+                seq_index INTEGER NOT NULL,
+                timestamp_millis INTEGER NOT NULL,
+                latitude REAL NOT NULL,
+                longitude REAL NOT NULL,
+                FOREIGN KEY(route_id) REFERENCES backtrack_routes(id) ON DELETE CASCADE
+            )
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS marker_points")
-        db.execSQL("DROP TABLE IF EXISTS track_points")
-        db.execSQL("DROP TABLE IF EXISTS workout_records")
-        onCreate(db)
+        if (oldVersion < 2) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS backtrack_routes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    route_name TEXT NOT NULL,
+                    created_at_millis INTEGER NOT NULL,
+                    source_workout_id INTEGER,
+                    FOREIGN KEY(source_workout_id) REFERENCES workout_records(id) ON DELETE SET NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS backtrack_nodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    route_id INTEGER NOT NULL,
+                    seq_index INTEGER NOT NULL,
+                    timestamp_millis INTEGER NOT NULL,
+                    latitude REAL NOT NULL,
+                    longitude REAL NOT NULL,
+                    FOREIGN KEY(route_id) REFERENCES backtrack_routes(id) ON DELETE CASCADE
+                )
+                """.trimIndent()
+            )
+        }
     }
 
     companion object {
         private const val DB_NAME = "outdoor_sport.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
     }
 }

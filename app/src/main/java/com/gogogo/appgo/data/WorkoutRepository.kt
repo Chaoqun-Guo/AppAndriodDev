@@ -3,6 +3,8 @@ package com.gogogo.appgo.data
 import android.content.ContentValues
 import android.content.Context
 import com.gogogo.appgo.model.Achievement
+import com.gogogo.appgo.model.BacktrackRouteSummary
+import com.gogogo.appgo.model.BreadcrumbPoint
 import com.gogogo.appgo.model.ExerciseType
 import com.gogogo.appgo.model.MarkerPoint
 import com.gogogo.appgo.model.StatsSummary
@@ -139,6 +141,101 @@ class WorkoutRepository(context: Context) {
             }
         }
         return points
+    }
+
+    fun saveBacktrackRoute(
+        routeName: String,
+        sourceWorkoutId: Long?,
+        nodes: List<BreadcrumbPoint>,
+        createdAtMillis: Long = System.currentTimeMillis(),
+    ): Long {
+        if (nodes.size < 2) return -1L
+        val db = dbHelper.writableDatabase
+        db.beginTransaction()
+        return try {
+            val routeId = db.insert(
+                "backtrack_routes",
+                null,
+                ContentValues().apply {
+                    put("route_name", routeName)
+                    put("created_at_millis", createdAtMillis)
+                    if (sourceWorkoutId != null) {
+                        put("source_workout_id", sourceWorkoutId)
+                    } else {
+                        putNull("source_workout_id")
+                    }
+                }
+            )
+            nodes.forEachIndexed { index, node ->
+                db.insert(
+                    "backtrack_nodes",
+                    null,
+                    ContentValues().apply {
+                        put("route_id", routeId)
+                        put("seq_index", index)
+                        put("timestamp_millis", node.timestampMillis)
+                        put("latitude", node.latitude)
+                        put("longitude", node.longitude)
+                    }
+                )
+            }
+            db.setTransactionSuccessful()
+            routeId
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun loadBacktrackRoutes(limit: Int = 30): List<BacktrackRouteSummary> {
+        val db = dbHelper.readableDatabase
+        val rows = mutableListOf<BacktrackRouteSummary>()
+        val cursor = db.rawQuery(
+            """
+            SELECT r.id, r.route_name, r.created_at_millis, r.source_workout_id, COUNT(n.id) AS node_count
+            FROM backtrack_routes r
+            LEFT JOIN backtrack_nodes n ON r.id = n.route_id
+            GROUP BY r.id
+            ORDER BY r.created_at_millis DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString()),
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                rows += BacktrackRouteSummary(
+                    id = it.getLong(0),
+                    name = it.getString(1),
+                    createdAtMillis = it.getLong(2),
+                    sourceWorkoutId = if (it.isNull(3)) null else it.getLong(3),
+                    nodeCount = it.getInt(4),
+                )
+            }
+        }
+        return rows
+    }
+
+    fun loadBacktrackNodes(routeId: Long): List<BreadcrumbPoint> {
+        val db = dbHelper.readableDatabase
+        val rows = mutableListOf<BreadcrumbPoint>()
+        val cursor = db.rawQuery(
+            """
+            SELECT timestamp_millis, latitude, longitude
+            FROM backtrack_nodes
+            WHERE route_id = ?
+            ORDER BY seq_index ASC
+            """.trimIndent(),
+            arrayOf(routeId.toString()),
+        )
+        cursor.use {
+            while (it.moveToNext()) {
+                rows += BreadcrumbPoint(
+                    timestampMillis = it.getLong(0),
+                    latitude = it.getDouble(1),
+                    longitude = it.getDouble(2),
+                )
+            }
+        }
+        return rows
     }
 
     fun statsForDays(days: Long, nowMillis: Long = System.currentTimeMillis()): StatsSummary {
